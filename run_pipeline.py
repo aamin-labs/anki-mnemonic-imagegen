@@ -7,6 +7,7 @@ import os
 import subprocess
 import sys
 import time
+from collections import Counter
 from datetime import datetime
 from pathlib import Path
 
@@ -14,30 +15,15 @@ from dotenv import load_dotenv
 
 # ── constants ─────────────────────────────────────────────────────────────────
 
-ANKI_IO_DIR = Path(__file__).parent / "anki_io"
-STATE_DIR = Path(__file__).parent / "state"
+from common import ANKI_IO_DIR, PROJECT_DIR, _ANKI_PYTHON_DEFAULT
 
+STATE_DIR = PROJECT_DIR / "state"
 _ANKI2_ROOT = Path.home() / "Library" / "Application Support" / "Anki2"
-_ANKI_PYTHON_DEFAULT = str(
-    Path.home()
-    / "Library"
-    / "Application Support"
-    / "AnkiProgramFiles"
-    / ".venv"
-    / "bin"
-    / "python3.13"
-)
 
 # ── workflow registry ──────────────────────────────────────────────────────────
 
+from workflows import WORKFLOWS
 from workflows.base import WorkflowError
-from workflows.mnemonic_image import MnemonicImageWorkflow
-
-WORKFLOWS = {
-    "mnemonic_image": MnemonicImageWorkflow,
-    # "research_enrichment": ResearchEnrichmentWorkflow,  # future
-    # "rewrite_qa": RewriteQAWorkflow,                    # future
-}
 
 # ── helpers ───────────────────────────────────────────────────────────────────
 
@@ -69,11 +55,7 @@ def resolve_anki_paths() -> tuple[str, str]:
 
     if not Path(col_path).exists():
         print(f"ERROR: Collection not found: {col_path}")
-        available = [
-            d.name for d in sorted(_ANKI2_ROOT.iterdir())
-            if d.is_dir() and d.name != "addons21"
-        ]
-        print(f"  Available profiles: {', '.join(available) or '(none found)'}")
+        print(f"  Available profiles: {', '.join(d.name for d in candidates) or '(none found)'}")
         print("  Fix: set ANKI_PROFILE=<profile-name> in .env")
         sys.exit(1)
 
@@ -106,9 +88,22 @@ def read_notes(anki_python: str, col_path: str, query: str, fields: list[str]) -
     return json.loads(raw)
 
 
-def write_notes(anki_python: str, col_path: str, state_path: Path):
+def _resolve_tag(cli_value: str | None, workflow, kind: str) -> str:
+    """Return the tag to use: CLI value if explicitly set, else workflow default, else ''."""
+    if cli_value is not None:
+        return cli_value  # explicit '' disables the default
+    attr = "DEFAULT_ADD_TAG" if kind == "add" else "DEFAULT_REMOVE_TAG"
+    return getattr(workflow, attr, "") if workflow else ""
+
+
+def write_notes(anki_python: str, col_path: str, state_path: Path, remove_tag: str = "", add_tag: str = ""):
+    extra = []
+    if remove_tag:
+        extra += ["--remove-tag", remove_tag]
+    if add_tag:
+        extra += ["--add-tag", add_tag]
     out = run_anki_script(anki_python, "write_notes.py", [
-        "--col", col_path, "--state", str(state_path),
+        "--col", col_path, "--state", str(state_path), *extra,
     ])
     if out.strip():
         print(out.rstrip())
@@ -137,6 +132,46 @@ def _fmt_duration(secs: float) -> str:
     return f"{m}m {s:02d}s"
 
 
+# ── verify ────────────────────────────────────────────────────────────────────
+
+
+def _run_verify(state_file: str, anki_python: str, col_path: str):
+    """Re-read processed notes from Anki and confirm output fields are non-empty."""
+    state_path = Path(state_file)
+    with open(state_path) as f:
+        state = json.load(f)
+
+    output_fields = state.get("output_fields", [])
+    if not output_fields:
+        print("ERROR: state file has no output_fields — cannot verify.")
+        sys.exit(1)
+
+    processed = {nid: entry for nid, entry in state["notes"].items() if entry["status"] == "processed"}
+    if not processed:
+        print("No processed notes in state file.")
+        return
+
+    print(f"Verifying {len(processed)} processed note(s) — fields: {output_fields}")
+    anki_data = read_notes(anki_python, col_path, state["query"], output_fields)
+    note_fields = {nid: info["fields"] for nid, info in anki_data["notes"].items()}
+
+    ok = failed = 0
+    for nid in processed:
+        fields = note_fields.get(nid, {})
+        missing = [f for f in output_fields if not fields.get(f, "").strip()]
+        if missing:
+            print(f"  MISSING  {nid}  ({', '.join(missing)} empty in Anki)")
+            failed += 1
+        else:
+            ok += 1
+
+    print(f"\n{'─' * 40}")
+    print(f"Verified: {ok} OK   {failed} missing")
+    if failed:
+        print(f"\nTo retry missing notes, run:")
+        print(f"  python3 run_pipeline.py --resume {state_path.resolve()}")
+
+
 # ── main ──────────────────────────────────────────────────────────────────────
 
 
@@ -153,6 +188,11 @@ def main():
         "--resume",
         metavar="STATE_FILE",
         help="Resume a previous run from its state file; retries only failed notes",
+    )
+    group.add_argument(
+        "--verify",
+        metavar="STATE_FILE",
+        help="Re-read processed notes from Anki and confirm output fields were written",
     )
     parser.add_argument(
         "--workflow",
@@ -186,12 +226,67 @@ def main():
         "--input-fields",
         help="Comma-separated input field names, e.g. 'Name,Highlight' (overrides workflow default)",
     )
+    parser.add_argument(
+        "--output-fields",
+        help="Comma-separated output field names, e.g. 'Image,Encoding' (overrides workflow default)",
+    )
+    parser.add_argument(
+        "--list-fields",
+        action="store_true",
+        help="Print field names for notes matched by --query and exit",
+    )
+    parser.add_argument(
+        "--yes-add-fields",
+        action="store_true",
+        help="Auto-confirm adding missing output fields to the notetype (non-interactive)",
+    )
+    parser.add_argument(
+        "--no-overwrite",
+        action="store_true",
+        help="Skip notes with output fields already filled, without prompting",
+    )
+    parser.add_argument(
+        "--prompt-file",
+        metavar="FILENAME",
+        help="Prompt template filename inside prompts/ (e.g. prompt-pm-mnemonic.md); overrides workflow default",
+    )
+    parser.add_argument(
+        "--remove-tag",
+        metavar="TAG",
+        default=None,
+        help="Remove this tag from successfully processed notes (pass '' to disable workflow default)",
+    )
+    parser.add_argument(
+        "--add-tag",
+        metavar="TAG",
+        default=None,
+        help="Add this tag to successfully processed notes (pass '' to disable workflow default)",
+    )
     args = parser.parse_args()
 
     load_dotenv()
 
     col_path, media_dir = resolve_anki_paths()
     check_anki_not_running()
+
+    if args.verify:
+        _run_verify(args.verify, args.anki_python, col_path)
+        return
+
+    if args.list_fields:
+        if not args.query:
+            print("ERROR: --list-fields requires --query")
+            sys.exit(1)
+        print(f"Querying: {args.query}")
+        anki_data = read_notes(args.anki_python, col_path, args.query, ["Front"])
+        if not anki_data["notes"]:
+            print("No notes matched that query.")
+            sys.exit(0)
+        print(f"Found {len(anki_data['notes'])} notes\n")
+        for mid, nt_info in anki_data["notetypes"].items():
+            print(f"Notetype: {nt_info['name']}")
+            print(f"Fields:   {', '.join(nt_info['field_names'])}")
+        sys.exit(0)
 
     WorkflowClass = WORKFLOWS[args.workflow]
     print(f"Workflow: {args.workflow}")
@@ -200,8 +295,9 @@ def main():
 
     # ── validate API keys early ───────────────────────────────────────────────
     if not args.dry_run:
-        if not os.environ.get("MINIMAX_API_KEY"):
-            print("ERROR: MINIMAX_API_KEY not set. Copy .env.example to .env and fill it in.")
+        missing_keys = [k for k in WorkflowClass.REQUIRED_ENV_KEYS if not os.environ.get(k)]
+        if missing_keys:
+            print(f"ERROR: {', '.join(missing_keys)} not set. Copy .env.example to .env and fill it in.")
             sys.exit(1)
 
     # ── load or create state ──────────────────────────────────────────────────
@@ -210,10 +306,11 @@ def main():
         with open(state_path) as f:
             state = json.load(f)
         input_fields = state.get("input_fields", WorkflowClass.INPUT_FIELDS)
+        output_fields = state.get("output_fields", WorkflowClass.OUTPUT_FIELDS)
         pending_nids = [nid for nid, v in state["notes"].items() if v["status"] == "pending"]
         print(f"Resuming {state_path} — {len(pending_nids)} pending notes")
         if pending_nids:
-            all_fields = list(dict.fromkeys(input_fields + WorkflowClass.OUTPUT_FIELDS))
+            all_fields = list(dict.fromkeys(input_fields + output_fields))
             anki_data = read_notes(args.anki_python, col_path, state["query"], all_fields)
             note_fields_cache = {nid: info["fields"] for nid, info in anki_data["notes"].items()}
     else:
@@ -222,7 +319,12 @@ def main():
             if args.input_fields
             else WorkflowClass.INPUT_FIELDS
         )
-        all_fields = list(dict.fromkeys(input_fields + WorkflowClass.OUTPUT_FIELDS))
+        output_fields = (
+            [f.strip() for f in args.output_fields.split(",")]
+            if args.output_fields
+            else WorkflowClass.OUTPUT_FIELDS
+        )
+        all_fields = list(dict.fromkeys(input_fields + output_fields))
         print(f"Querying: {args.query}")
         anki_data = read_notes(args.anki_python, col_path, args.query, all_fields)
         notes_data = anki_data["notes"]
@@ -237,14 +339,14 @@ def main():
             missing = [
                 (mid_str, nt_info["name"], field)
                 for mid_str, nt_info in notetypes.items()
-                for field in WorkflowClass.OUTPUT_FIELDS
+                for field in output_fields
                 if field not in nt_info["field_names"]
             ]
             if missing:
                 print("\nMissing output fields:")
                 for _, nt_name, field in missing:
                     print(f"  '{field}' in notetype '{nt_name}'")
-                ans = input("Add all missing fields? [y/N] ")
+                ans = "y" if args.yes_add_fields else input("Add all missing fields? [y/N] ")
                 if ans.strip().lower() != "y":
                     print("Aborting.")
                     sys.exit(1)
@@ -259,6 +361,7 @@ def main():
             "query": args.query,
             "anki_python": args.anki_python,
             "input_fields": input_fields,
+            "output_fields": output_fields,
             "created_at": datetime.now().isoformat(),
             "notes": {nid: {"status": "pending"} for nid in notes_data},
         }
@@ -279,9 +382,13 @@ def main():
     if not args.dry_run:
         try:
             workflow = WorkflowClass({
-                "minimax_api_key": os.environ.get("MINIMAX_API_KEY", ""),
+                "anthropic_api_key": os.environ.get("ANTHROPIC_API_KEY", ""),
+                "gemini_api_key": os.environ.get("GEMINI_API_KEY", ""),
                 "media_dir": media_dir,
                 "input_fields": input_fields,
+                "output_fields": output_fields,
+                "prompt_file": args.prompt_file,
+                "query": args.query or state.get("query", ""),
             })
         except RuntimeError as e:
             print(f"ERROR: {e}")
@@ -289,7 +396,31 @@ def main():
     else:
         workflow = None
 
+    # ── overwrite confirmation ────────────────────────────────────────────────
+    force_overwrite = False
+    if not args.dry_run:
+        skip_results = [
+            (nid, workflow.should_skip(nid, note_fields_cache.get(nid, {})))
+            for nid in pending_nids
+        ]
+        prefilled = [nid for nid, (skip, _) in skip_results if skip]
+        if prefilled:
+            reason_counts = Counter(reason for _, (skip, reason) in skip_results if skip)
+            reason_summary = ", ".join(f"{count} {reason}" for reason, count in reason_counts.items())
+            print(f"\n{len(prefilled)} of {len(pending_nids)} note(s) will be skipped ({reason_summary}).")
+            if args.no_overwrite:
+                print("Existing values will be skipped.")
+            else:
+                ans = input("Overwrite existing values? [y/N] ").strip().lower()
+                if ans == "y":
+                    force_overwrite = True
+                    print("Overwriting existing values.")
+                else:
+                    print("Existing values will be skipped.")
+
     # ── main loop ─────────────────────────────────────────────────────────────
+    write_remove_tag = _resolve_tag(args.remove_tag, workflow, "remove")
+    write_add_tag = _resolve_tag(args.add_tag, workflow, "add")
     counts = {"processed": 0, "failed": 0, "skipped": 0}
     processed_since_write = 0
     total = len(pending_nids)
@@ -306,11 +437,10 @@ def main():
             continue
 
         skip, reason = workflow.should_skip(nid, fields)
-        if skip:
+        if skip and not force_overwrite:
             print(f"skip ({reason})")
             state["notes"][nid] = {"status": "skipped", "reason": reason}
             counts["skipped"] += 1
-            save_state(state_path, state)
             continue
 
         try:
@@ -336,12 +466,14 @@ def main():
         save_state(state_path, state)
 
         if processed_since_write >= args.write_batch_size:
-            write_notes(args.anki_python, col_path, state_path)
+            write_notes(args.anki_python, col_path, state_path, remove_tag=write_remove_tag, add_tag=write_add_tag)
             processed_since_write = 0
+
+    save_state(state_path, state)
 
     # flush remainder
     if processed_since_write > 0 and not args.dry_run:
-        write_notes(args.anki_python, col_path, state_path)
+        write_notes(args.anki_python, col_path, state_path, remove_tag=write_remove_tag, add_tag=write_add_tag)
 
     if workflow:
         workflow.teardown()
@@ -362,8 +494,11 @@ def main():
         print("  2. Check a few cards to verify the output")
 
     if counts["failed"]:
-        print(f"\nRetry failures:")
-        print(f"  python3 run_pipeline.py --resume {state_path}")
+        print(f"\nRetry failures with:")
+        print(f"  python3 run_pipeline.py --resume {state_path.resolve()}")
+
+    print(f"\nVerify writes with:")
+    print(f"  python3 run_pipeline.py --verify {state_path.resolve()}")
 
 
 if __name__ == "__main__":

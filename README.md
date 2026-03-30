@@ -1,13 +1,11 @@
-# anki-mnemonic-imagegen
+# anki-enrich
 
-A CLI pipeline that bulk-enhances Anki cards with AI-generated content. Currently supports generating visual mnemonic images via an AI text model (prompt design) and an AI image model.
-
-Designed to be extensible — adding a new workflow is a single file plus a registry entry.
+A CLI pipeline that bulk-enhances Anki cards with AI-generated content. Supports multiple workflows — mnemonic image generation, field formatting, one-line highlights — and is designed to be extensible.
 
 ## Installation
 
 ```bash
-git clone https://github.com/aamin-labs/anki-mnemonic-imagegen
+git clone https://github.com/aamin-labs/anki-enrich
 cd anki-enrich
 python3 -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
@@ -18,10 +16,11 @@ cp .env.example .env   # then fill in your API keys
 
 Copy `.env.example` to `.env` and fill in:
 
-| Key | Required | Description |
+| Key | Required for | Description |
 |---|---|---|
-| `MINIMAX_API_KEY` | Yes | API key from [minimax.io](https://www.minimax.io) |
-| `ANKI_PROFILE` | No | Anki profile name (auto-detects the first profile if unset) |
+| `ANTHROPIC_API_KEY` | all workflows | API key from [console.anthropic.com](https://console.anthropic.com) |
+| `GEMINI_API_KEY` | `mnemonic_image` | API key from [aistudio.google.com](https://aistudio.google.com) |
+| `ANKI_PROFILE` | optional | Anki profile name (auto-detects first profile if unset) |
 
 To find your Anki profile name: `ls ~/Library/Application\ Support/Anki2/`
 
@@ -30,75 +29,114 @@ To find your Anki profile name: `ls ~/Library/Application\ Support/Anki2/`
 **Make sure Anki is closed before running**, then sync to AnkiWeb first to avoid losing review progress.
 
 ```bash
+# See what fields a deck has before choosing input fields
+.venv/bin/python3 run_pipeline.py --query 'deck:"My Deck"' --workflow format_fields --list-fields
+
 # Dry run — no API calls, shows which notes would be processed
-python3 run_pipeline.py --query 'tag:need-image' --workflow mnemonic_image --dry-run
+.venv/bin/python3 run_pipeline.py --query 'deck:"My Deck"' --workflow format_fields --dry-run
 
-# Test on a single card before committing to a full run
-python3 run_pipeline.py --query 'deck:"My Deck"' --workflow mnemonic_image --limit 1
+# Test on a few cards first
+.venv/bin/python3 run_pipeline.py --query 'deck:"My Deck"' --workflow format_fields --limit 3
 
-# Run on a tag (uses Front/Back fields by default)
-python3 run_pipeline.py --query 'tag:need-image' --workflow mnemonic_image
-
-# Use custom input fields for a different deck
-python3 run_pipeline.py --query 'deck:"My Deck"' --workflow mnemonic_image --input-fields Name,Highlight
+# Run on all new/learning cards in a deck
+.venv/bin/python3 run_pipeline.py --query 'deck:"My Deck" (is:new OR is:learn)' --workflow format_fields
 
 # Resume a crashed run — retries only failed notes
-python3 run_pipeline.py --resume state/mnemonic_image_20260301_120000.json
+.venv/bin/python3 run_pipeline.py --resume state/format_fields_20260301_120000.json
 ```
+
+After running, open Anki and sync to AnkiWeb (Cmd+Y) to push the changes to your other devices.
 
 ### CLI flags
 
 | Flag | Description |
 |---|---|
 | `--query QUERY` | Anki search query (standard Anki search syntax) |
+| `--workflow NAME` | Workflow to run (see Workflows below) |
 | `--resume FILE` | Resume a previous run; retries only failed notes |
-| `--workflow NAME` | Workflow to run (default: `mnemonic_image`) |
+| `--verify FILE` | Re-read processed notes from Anki and confirm fields are non-empty |
 | `--dry-run` | No API calls or writes; useful for previewing matches |
 | `--limit N` | Process at most N notes; useful for testing |
-| `--input-fields A,B` | Override default input fields (comma-separated) |
+| `--list-fields` | Print available fields for matched notes and exit |
+| `--input-fields A,B` | Override workflow's default input fields (comma-separated) |
+| `--no-overwrite` | Skip notes where output fields are already filled |
 | `--write-batch-size N` | Write to Anki every N notes (default: 10) |
+| `--yes-add-fields` | Auto-confirm adding missing output fields to the notetype |
 
-After running, open Anki and sync to AnkiWeb to push the changes to your other devices.
+## Workflows
+
+### `format_fields`
+
+Applies minimal HTML formatting to existing card fields using Claude.
+
+**Formatting rules applied:**
+- `<b>bold</b>` — key terms, concept names, proper nouns
+- `<br>` — line breaks between logically distinct parts of a multi-part answer
+- `<ul><li>` — bullet lists for 3+ enumerable items only
+
+**Default fields:** `Answer`, `Explanation` (in-place update — same fields read and written back)
+
+**Tags:** Adds `fields-formatted` to every processed note automatically.
+
+**Skip logic:** Skips suspended cards always. Skips notes already tagged `fields-formatted`. Skips fields that already contain HTML tags (secondary guard for cards formatted outside the pipeline).
+
+**First run:**
+```bash
+.venv/bin/python3 run_pipeline.py \
+  --query 'deck:"My Deck" -is:suspended -note:"Image Occlusion Enhanced"' \
+  --workflow format_fields
+```
+
+**Subsequent runs** (only unformatted cards):
+```bash
+.venv/bin/python3 run_pipeline.py \
+  --query 'deck:"My Deck" -tag:fields-formatted -is:suspended -note:"Image Occlusion Enhanced"' \
+  --workflow format_fields
+```
+
+---
+
+### `highlight`
+
+Generates a one-sentence summary of the most significant highlight or legacy for British Prime Minister cards.
+
+**Default fields:** Input: `PM`, `Other` → Output: `Highlight`
+
+```bash
+.venv/bin/python3 run_pipeline.py \
+  --query 'deck:"1. 🎖️ E and R::1.42 🇬🇧 British Prime Ministers"' \
+  --workflow highlight
+```
+
+---
+
+### `mnemonic_image`
+
+Generates a visual mnemonic image for a card. Uses Claude to design the mnemonic and Google Imagen to render it.
+
+**Default fields:** Input: `Front`, `Back` → Output: `Mnemonic` (img tag), `Encoding` (one-sentence description)
+
+```bash
+.venv/bin/python3 run_pipeline.py \
+  --query 'tag:need-image' \
+  --workflow mnemonic_image
+```
 
 ## How it works
 
 1. Reads matching notes from your Anki collection via Anki's own Python runtime
-2. Sends the card's question/answer to a text model to design a visual mnemonic and image prompt
-3. Passes the image prompt to an image model to generate a PNG
-4. Saves the image to Anki's media folder and writes the `<img>` tag back to the note
-5. State is saved after each note — interrupted runs can be resumed with `--resume`
+2. For each note, calls the workflow's `process_note()` to generate output
+3. State is saved after each note — interrupted runs can be resumed with `--resume`
+4. Writes output fields back to Anki in batches
 
 ## Architecture
 
 Two Python environments are kept strictly separate:
 
-- **Project venv** — handles all API calls
+- **Project venv** — handles all API calls and orchestration
 - **Anki's bundled Python** (`AnkiProgramFiles/.venv/bin/python3.13`) — the only process that touches `collection.anki2`
 
-This separation avoids SQLite version mismatches that corrupt the Anki database.
-
-## Troubleshooting
-
-**`ERROR: MINIMAX_API_KEY not set`**
-Copy `.env.example` to `.env` and add your API key from [minimax.io](https://www.minimax.io).
-
-**`ERROR: No Anki profiles found`**
-Run `ls ~/Library/Application\ Support/Anki2/` to see your profile names, then set `ANKI_PROFILE=<name>` in `.env`.
-
-**`ERROR: Collection not found`**
-Your `ANKI_PROFILE` value doesn't match a directory in `~/Library/Application Support/Anki2/`. Check the spelling.
-
-**`ERROR: Anki is running`**
-Close Anki before running the pipeline. Anki holds a write lock on the collection file.
-
-**`API key is invalid`**
-Check that `MINIMAX_API_KEY` in `.env` is correct. Generate a new key at [minimax.io](https://www.minimax.io) if needed.
-
-**`Could not parse image prompt from response`**
-The text model didn't follow the expected output format. This is rare; re-running with `--resume` will retry the failed note.
-
-**Notes processed but images not showing in Anki**
-Make sure you sync after the run (Cmd+Y). Also check that the `Mnemonic` field exists on your notetype and the card template references it with `{{Mnemonic}}`.
+This separation avoids SQLite version mismatches that would corrupt the Anki database.
 
 ## Creating Custom Workflows
 
@@ -111,30 +149,51 @@ class MyWorkflow(EnhancementWorkflow):
     WORKFLOW_NAME = "my_workflow"
     INPUT_FIELDS = ["Front", "Back"]   # fields to read from Anki
     OUTPUT_FIELDS = ["MyField"]        # fields to write back
+    REQUIRED_ENV_KEYS = ["ANTHROPIC_API_KEY"]
 
     def __init__(self, config: dict):
         super().__init__(config)
-        # initialize API clients, load prompts, etc.
 
     def process_note(self, note_id: str, fields: dict[str, str]) -> dict[str, str]:
         # return {field_name: value} to write back
         return {"MyField": "generated content"}
 ```
 
-2. Register it in `run_pipeline.py`:
+2. Register it in `workflows/__init__.py`:
 
 ```python
-from workflows.my_workflow import MyWorkflow
+from .my_workflow import MyWorkflow
 
 WORKFLOWS = {
-    "mnemonic_image": MnemonicImageWorkflow,
+    ...
     "my_workflow": MyWorkflow,
 }
 ```
 
-3. Run it: `python3 run_pipeline.py --query '...' --workflow my_workflow`
+3. Run it: `.venv/bin/python3 run_pipeline.py --query '...' --workflow my_workflow`
 
-`should_skip()` is inherited and skips notes where any output field is already filled. Override it for custom skip logic.
+**Notes:**
+- `should_skip()` is inherited and skips notes where any output field is already filled. Override for custom logic.
+- Fields prefixed with `__` (e.g. `__suspended__`, `__image_prompt__`) are metadata injected by the pipeline and never written back to Anki.
+- Raise `WorkflowError` for recoverable errors — the note is marked failed and the run continues.
+- Set `DEFAULT_ADD_TAG` / `DEFAULT_REMOVE_TAG` on your workflow class to automatically apply tags on every successful write. The CLI `--add-tag` / `--remove-tag` flags override these; pass `''` to disable the default.
+
+## Troubleshooting
+
+**`ModuleNotFoundError: No module named 'dotenv'`**
+Use `.venv/bin/python3` instead of `python3` to run the pipeline.
+
+**`ERROR: No Anki profiles found`**
+Run `ls ~/Library/Application\ Support/Anki2/` to see your profile names, then set `ANKI_PROFILE=<name>` in `.env`.
+
+**`ERROR: Anki is running`**
+Close Anki before running the pipeline. Anki holds a write lock on the collection file.
+
+**`Invalid search: is: was given an invalid argument 'learning'`**
+Use `is:learn` not `is:learning` in your Anki query.
+
+**Notes processed but changes not showing in Anki**
+Make sure you sync after the run (Cmd+Y). Also verify with `--verify state/<file>.json`.
 
 ## Requirements
 
@@ -144,4 +203,3 @@ WORKFLOWS = {
 ## License
 
 MIT
->>>>>>> e44d68e (Initial commit — anki-enrich pipeline)

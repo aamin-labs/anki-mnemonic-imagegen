@@ -29,8 +29,6 @@ def main():
         note_ids = col.find_notes(args.query)
 
         notes_out = {}
-        notetypes_out = {}
-
         nt_cache = {}
         for nid in note_ids:
             note = col.get_note(nid)
@@ -47,15 +45,18 @@ def main():
             note_dict = dict(note.items())
             note_fields = {fn: note_dict.get(fn, "") for fn in field_names}
 
+            card_ids = col.find_cards(f"nid:{nid}")
+            note_fields["__suspended__"] = any(
+                col.get_card(cid).queue == -1 for cid in card_ids
+            )
+
             notes_out[str(nid)] = {
                 "mid": note.mid,
                 "notetype_name": nt_info["name"],
                 "fields": note_fields,
             }
 
-        notetypes_out = nt_cache
-
-        json.dump({"notes": notes_out, "notetypes": notetypes_out}, sys.stdout)
+        json.dump({"notes": notes_out, "notetypes": nt_cache}, sys.stdout)
     finally:
         col.close()
 
