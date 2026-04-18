@@ -76,7 +76,7 @@ Fills an image field with small Wikipedia/Wikimedia thumbnails for people cards,
 
 The script auto-backs up `collection.anki2` before writing and refuses to run while Anki is open.
 
-### CLI flags
+### Pipeline CLI flags
 
 | Flag | Description |
 |---|---|

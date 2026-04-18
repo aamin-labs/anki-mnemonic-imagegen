@@ -23,7 +23,6 @@ import argparse
 import html
 import json
 import shutil
-import sys
 import time
 from pathlib import Path
 from urllib.error import HTTPError
@@ -36,15 +35,6 @@ from anki.collection import Collection
 ANKI2_ROOT = Path.home() / "Library" / "Application Support" / "Anki2"
 USER_AGENT = "anki-enrich/1.0 (Abu local script; Wikipedia thumbnail fetcher)"
 DEFAULT_THUMB_SIZE = 220
-DEFAULT_ANKI_PYTHON = (
-    Path.home()
-    / "Library"
-    / "Application Support"
-    / "AnkiProgramFiles"
-    / ".venv"
-    / "bin"
-    / "python3.13"
-)
 
 
 def parse_args() -> argparse.Namespace:
@@ -111,12 +101,6 @@ def load_title_map(path: str | None) -> dict[str, str]:
     return {str(k).strip(): str(v).strip() for k, v in data.items()}
 
 
-def http_get_json(url: str) -> dict:
-    req = Request(url, headers={"User-Agent": USER_AGENT})
-    with urlopen(req, timeout=30) as resp:
-        return json.load(resp)
-
-
 def http_get_bytes(url: str, retries: int = 5) -> bytes:
     delay = 2
     last_error = None
@@ -147,7 +131,9 @@ def wiki_thumb_info(title: str, thumb_size: int) -> tuple[str, str, str]:
             "redirects": "1",
         }
     )
-    data = http_get_json(f"https://en.wikipedia.org/w/api.php?{params}")
+    req = Request(f"https://en.wikipedia.org/w/api.php?{params}", headers={"User-Agent": USER_AGENT})
+    with urlopen(req, timeout=30) as resp:
+        data = json.load(resp)
     page = next(iter(data["query"]["pages"].values()))
     thumb = page.get("thumbnail", {}).get("source")
     fullurl = page.get("fullurl")
@@ -192,7 +178,7 @@ def main() -> None:
             if field not in available_fields:
                 raise SystemExit(f"Field '{field}' not found on matched notes. Available: {sorted(available_fields)}")
 
-        planned: list[tuple[int, str, str, str, str, str]] = []
+        planned: list[tuple[int, str, str, str]] = []
         skipped_existing = 0
 
         for nid in note_ids:
@@ -208,7 +194,7 @@ def main() -> None:
 
             wiki_title = title_map.get(name, name)
             resolved_title, thumb_url, source_url = wiki_thumb_info(wiki_title, args.thumb_size)
-            planned.append((nid, name, wiki_title, resolved_title, thumb_url, source_url))
+            planned.append((nid, name, thumb_url, source_url))
             print(f"• {name} -> {resolved_title}")
 
         print(f"\nPlanned updates: {len(planned)}")
@@ -223,7 +209,7 @@ def main() -> None:
         print(f"✓ Backup saved to: {backup_path}")
 
         updated_nids: list[int] = []
-        for nid, name, wiki_title, resolved_title, thumb_url, source_url in planned:
+        for nid, name, thumb_url, source_url in planned:
             note = col.get_note(nid)
             ext = image_extension(thumb_url)
             filename = f"{args.filename_prefix}_{nid}{ext}"
