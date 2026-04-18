@@ -47,6 +47,35 @@ To find your Anki profile name: `ls ~/Library/Application\ Support/Anki2/`
 
 After running, open Anki and sync to AnkiWeb (Cmd+Y) to push the changes to your other devices.
 
+## One-off utility scripts
+
+### `scripts/fill_people_images.py`
+
+Fills an image field with small Wikipedia/Wikimedia thumbnails for people cards, and writes the article URL to a source field.
+
+**Dry run first:**
+```bash
+/Users/aamin/Library/Application\ Support/AnkiProgramFiles/.venv/bin/python3.13 scripts/fill_people_images.py \
+  --query 'deck:"1. 🎖️ Active::1.40 📜 History" flag:3' \
+  --dry-run
+```
+
+**Real run with title overrides** (useful when the note says `Victoria` but Wikipedia's page is `Queen Victoria`):
+```bash
+/Users/aamin/Library/Application\ Support/AnkiProgramFiles/.venv/bin/python3.13 scripts/fill_people_images.py \
+  --query 'deck:"1. 🎖️ Active::1.40 📜 History" flag:3' \
+  --title-map data/british_monarch_titles.json
+```
+
+**Useful flags:**
+- `--name-field Question` — field containing the person's name
+- `--image-field Image` — field to populate with `<img src="...">`
+- `--source-field Source` — field to populate with the Wikipedia URL
+- `--thumb-size 220` — request a smaller thumbnail
+- `--overwrite` — replace existing images instead of skipping them
+
+The script auto-backs up `collection.anki2` before writing and refuses to run while Anki is open.
+
 ### CLI flags
 
 | Flag | Description |
