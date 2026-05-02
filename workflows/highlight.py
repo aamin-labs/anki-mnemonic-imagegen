@@ -16,6 +16,7 @@ _SYSTEM = (
 
 class HighlightWorkflow(EnhancementWorkflow):
     WORKFLOW_NAME = "highlight"
+    DESCRIPTION = "One-sentence highlight per card"
     INPUT_FIELDS = ["PM", "Other"]
     OUTPUT_FIELDS = ["Highlight"]
     REQUIRED_ENV_KEYS = ["ANTHROPIC_API_KEY"]

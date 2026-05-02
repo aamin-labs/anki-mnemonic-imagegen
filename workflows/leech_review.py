@@ -18,6 +18,9 @@ You are an expert Anki flashcard designer and spaced-repetition coach. Your job 
 diagnose why a card has become a leech (failed 8+ times) by identifying flashcard design \
 failures and suggesting a concrete revision.
 
+The card content may include a Context field — use it to understand the subject area \
+and domain; it often clarifies ambiguity in the question or answer.
+
 Analyse the card against these failure modes (based on SuperMemo's 20 rules):
 
 1. MINIMUM INFORMATION — The card tests more than one independent fact. Each card should \
@@ -47,11 +50,11 @@ you cannot confirm without seeing other cards.
 Output a single JSON object — no markdown fences, no explanation outside the JSON:
 
 {
-  "issues": ["<short description of each problem, one string per issue>"],
+  "issues": ["<label only, e.g. MINIMUM INFORMATION or AMBIGUOUS QUESTION>"],
   "severity": "<high|medium|low>",
   "revised_front": "<improved question, or original if no change needed>",
   "revised_back": "<improved answer, or original if no change needed>",
-  "rationale": "<one paragraph: diagnosis and why the revision helps>"
+  "rationale": "<one sentence: the core diagnosis and why the revision helps>"
 }
 
 Severity guide:
@@ -66,9 +69,12 @@ and severity to "low".\
 
 class LeechReviewWorkflow(EnhancementWorkflow):
     WORKFLOW_NAME = "leech_review"
+    DESCRIPTION = "Markdown report diagnosing leech cards"
+    DEFAULT_FILTER = "tag:leech -tag:leech-reviewed"
     INPUT_FIELDS = _CANDIDATE_FIELDS
     OUTPUT_FIELDS = []
     REQUIRED_ENV_KEYS = ["ANTHROPIC_API_KEY"]
+    WRITES_FIELDS = False
     DEFAULT_ADD_TAG = "leech-reviewed"
     DEFAULT_REMOVE_TAG = ""
 
@@ -113,12 +119,14 @@ class LeechReviewWorkflow(EnhancementWorkflow):
             (fields.get(f, "").strip() for f in ("Back", "Answer", "Explanation", "Extra") if fields.get(f, "").strip()),
             "",
         )
+        context_val = fields.get("Context", "").strip()
 
         self._results.append({
             "note_id": note_id,
             "severity": severity,
             "front": front_val,
             "back": back_val,
+            "context": context_val,
             "issues": data.get("issues") or [],
             "revised_front": str(data.get("revised_front", "")).strip(),
             "revised_back": str(data.get("revised_back", "")).strip(),
@@ -147,14 +155,24 @@ class LeechReviewWorkflow(EnhancementWorkflow):
                     pass
             raise WorkflowError(f"Could not parse JSON from Claude response:\n{raw[:300]}")
 
+    @staticmethod
+    def _extract_deck(query: str) -> str:
+        """Pull deck name(s) from a query string like deck:\"Foo::Bar\"."""
+        matches = re.findall(r'deck:"([^"]+)"', query)
+        if not matches:
+            matches = re.findall(r"deck:(\S+)", query)
+        return ", ".join(matches) if matches else ""
+
     def _render_markdown(self) -> str:
         severity_order = {"HIGH": 0, "MEDIUM": 1, "LOW": 2}
         sorted_results = sorted(self._results, key=lambda r: severity_order.get(r["severity"], 3))
 
+        deck = self._extract_deck(self._query)
         lines = [
             f"# Leech Review — {self._run_ts.strftime('%Y-%m-%d')}",
             "",
             f"**Generated:** {self._run_ts.strftime('%Y-%m-%d %H:%M:%S')}  ",
+            f"**Deck:** {deck or '(see query)'}  ",
             f"**Query:** {self._query}  ",
             f"**Total reviewed:** {len(self._results)}  ",
             "",
@@ -164,27 +182,32 @@ class LeechReviewWorkflow(EnhancementWorkflow):
         for r in sorted_results:
             front = r["front"] or "(empty)"
             back = r["back"] or "(empty)"
+            context = r.get("context", "")
             revised_front = r["revised_front"] or front
             revised_back = r["revised_back"] or back
             issues = r["issues"] or []
-            issues_lines = [f"{i + 1}. {issue}" for i, issue in enumerate(issues)] or ["(none identified)"]
+            issues_str = " · ".join(issues) if issues else "(none identified)"
 
-            lines += [
-                f"## Card {r['note_id']} — {r['severity']}",
+            card_lines = [
+                f"## {r['note_id']} — {r['severity']}",
                 "",
-                f"**Front:** {front}  ",
-                f"**Back:** {back}  ",
+                f"**F:** {front}  ",
+                f"**B:** {back}  ",
+            ]
+            if context:
+                card_lines.append(f"**C:** {context}  ")
+            card_lines += [
                 "",
-                "### Issues",
-                *issues_lines,
-                "",
-                "### Suggested Revision",
-                f"**New Front:** {revised_front}  ",
-                f"**New Back:** {revised_back}  ",
-                "",
+                f"**Issues:** {issues_str}  ",
                 f"**Rationale:** {r['rationale'] or '(none provided)'}",
                 "",
-                "---",
-                "",
             ]
+            if revised_front != front or revised_back != back:
+                card_lines += [
+                    f"**→ F:** {revised_front}  ",
+                    f"**→ B:** {revised_back}  ",
+                    "",
+                ]
+            card_lines += ["---", ""]
+            lines += card_lines
         return "\n".join(lines)

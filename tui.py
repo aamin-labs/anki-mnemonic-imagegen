@@ -3,12 +3,10 @@
 from __future__ import annotations
 
 import asyncio
-import json
 import os
 import re
 import sys
 from dataclasses import dataclass
-from pathlib import Path
 
 from dotenv import load_dotenv
 from textual import on, work
@@ -30,7 +28,8 @@ from textual.widgets import (
     RichLog,
 )
 
-from common import ANKI_IO_DIR, PROJECT_DIR, _ANKI_PYTHON_DEFAULT
+from anki_backends import DirectAnkiBackend
+from common import PROJECT_DIR, _ANKI_PYTHON_DEFAULT, resolve_anki_paths
 from workflows import WORKFLOWS
 
 # ── constants ──────────────────────────────────────────────────────────────────
@@ -38,41 +37,20 @@ from workflows import WORKFLOWS
 load_dotenv(PROJECT_DIR / ".env")
 ANKI_PYTHON = os.environ.get("ANKI_PYTHON", _ANKI_PYTHON_DEFAULT)
 
-# Only workflow-TUI-specific metadata lives here; all other attributes come from
-# the workflow classes themselves (REQUIRED_ENV_KEYS, INPUT_FIELDS, OUTPUT_FIELDS).
-_WORKFLOW_INFO: dict[str, dict] = {
-    "highlight": {
-        "description": "One-sentence highlight per card (Claude only)",
-        "default_filter": "",
-    },
-    "mnemonic_image": {
-        "description": "Visual mnemonic image (Claude + Imagen)",
-        "default_filter": "tag:need-image",
-    },
-}
-
 # Per-deck field name cache so ConfigScreen doesn't re-query on back/forward navigation.
 _fields_cache: dict[str, list[str]] = {}
 
 # ── helpers ───────────────────────────────────────────────────────────────────
 
 
-def get_col_path() -> str:
-    """Resolve collection.anki2 path using ANKI_PROFILE env or auto-detection."""
-    anki2_root = Path.home() / "Library" / "Application Support" / "Anki2"
+def get_backend() -> DirectAnkiBackend | None:
+    """Resolve the direct Anki backend used for deck and field lookup."""
     profile = os.environ.get("ANKI_PROFILE", "").strip()
-    if profile:
-        return str(anki2_root / profile / "collection.anki2")
     try:
-        candidates = sorted(
-            d for d in anki2_root.iterdir()
-            if d.is_dir() and d.name != "addons21"
-        )
-        if candidates:
-            return str(candidates[0] / "collection.anki2")
-    except FileNotFoundError:
-        pass
-    return ""
+        paths = resolve_anki_paths(profile or None)
+    except RuntimeError:
+        return None
+    return DirectAnkiBackend(ANKI_PYTHON, paths.collection)
 
 
 # ── dataclass ─────────────────────────────────────────────────────────────────
@@ -100,7 +78,10 @@ class DeckItem(ListItem):
 
 class WorkflowItem(ListItem):
     def __init__(self, workflow_id: str, description: str) -> None:
-        super().__init__(Label(f"[b]{workflow_id}[/b]  –  {description}"))
+        label = f"[b]{workflow_id}[/b]"
+        if description:
+            label += f"  –  {description}"
+        super().__init__(Label(label))
         self.workflow_id = workflow_id
 
 
@@ -138,29 +119,21 @@ class DeckSelectScreen(Screen):
 
     @work(exclusive=True)
     async def fetch_decks(self) -> None:
-        col_path = get_col_path()
-        if not col_path:
+        backend = get_backend()
+        if not backend:
             self.query_one("#loading").remove()
             await self.mount(Label("ERROR: Could not find Anki collection.", id="error-label"))
             return
 
-        proc = await asyncio.create_subprocess_exec(
-            ANKI_PYTHON,
-            str(ANKI_IO_DIR / "list_decks.py"),
-            "--col", col_path,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-        )
-        stdout, stderr = await proc.communicate()
+        try:
+            decks = await asyncio.to_thread(backend.list_decks)
+        except RuntimeError as e:
+            self.query_one("#loading").remove()
+            await self.mount(Label(f"ERROR: {e}", id="error-label"))
+            return
 
         self.query_one("#loading").remove()
 
-        if proc.returncode != 0:
-            err = stderr.decode(errors="replace").strip()
-            await self.mount(Label(f"ERROR: {err or 'Failed to load decks'}", id="error-label"))
-            return
-
-        decks = json.loads(stdout)["decks"]
         lv = ListView(*[DeckItem(d) for d in decks], id="deck-list")
         await self.mount(lv)
         lv.focus()
@@ -187,7 +160,7 @@ class WorkflowSelectScreen(Screen):
     def compose(self) -> ComposeResult:
         yield Header(show_clock=False)
         yield ListView(
-            *[WorkflowItem(wid, _WORKFLOW_INFO[wid]["description"]) for wid in WORKFLOWS],
+            *[WorkflowItem(wid, workflow.DESCRIPTION) for wid, workflow in WORKFLOWS.items()],
             id="workflow-list",
         )
         yield Footer()
@@ -220,7 +193,6 @@ class ConfigScreen(Screen):
         self._deck_name = deck_name
         self._workflow_id = workflow_id
         self._workflow_class = WORKFLOWS[workflow_id]
-        self._info = _WORKFLOW_INFO[workflow_id]
 
     def compose(self) -> ComposeResult:
         wf = self._workflow_class
@@ -233,7 +205,7 @@ class ConfigScreen(Screen):
             yield Label("", classes="divider")
             yield Label("Filter (appended to deck query):", classes="config-label")
             yield Input(
-                value=self._info["default_filter"],
+                value=self._workflow_class.DEFAULT_FILTER,
                 placeholder="e.g. tag:need-image",
                 id="filter-input",
             )
@@ -248,8 +220,13 @@ class ConfigScreen(Screen):
             yield Label("", id="available-fields-label", classes="hint")
 
             yield Label("", classes="divider")
+            output_label = (
+                f"Output fields: {', '.join(wf.OUTPUT_FIELDS)}"
+                if wf.OUTPUT_FIELDS
+                else "Output: report/tag only"
+            )
             yield Label(
-                f"Output fields: {', '.join(wf.OUTPUT_FIELDS)}",
+                output_label,
                 classes="config-label",
             )
 
@@ -280,26 +257,13 @@ class ConfigScreen(Screen):
             )
             return
 
-        col_path = get_col_path()
-        if not col_path:
-            return
-
-        proc = await asyncio.create_subprocess_exec(
-            ANKI_PYTHON,
-            str(ANKI_IO_DIR / "read_notes.py"),
-            "--col", col_path,
-            "--query", f'deck:"{self._deck_name}"',
-            "--fields", "Front",
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-        )
-        stdout, stderr = await proc.communicate()
-        if proc.returncode != 0:
+        backend = get_backend()
+        if not backend:
             return
 
         try:
-            data = json.loads(stdout)
-        except json.JSONDecodeError:
+            data = await asyncio.to_thread(backend.read_notes, f'deck:"{self._deck_name}"', ["Front"])
+        except RuntimeError:
             return
 
         all_fields: list[str] = []

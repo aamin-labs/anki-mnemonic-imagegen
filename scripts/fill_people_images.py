@@ -22,7 +22,7 @@ from __future__ import annotations
 import argparse
 import html
 import json
-import shutil
+import sys
 import time
 from pathlib import Path
 from urllib.error import HTTPError
@@ -31,8 +31,10 @@ from urllib.request import Request, urlopen
 
 from anki.collection import Collection
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from common import backup_collection, ensure_anki_closed, resolve_anki_paths
 
-ANKI2_ROOT = Path.home() / "Library" / "Application Support" / "Anki2"
+
 USER_AGENT = "anki-enrich/1.0 (Abu local script; Wikipedia thumbnail fetcher)"
 DEFAULT_THUMB_SIZE = 220
 
@@ -70,25 +72,6 @@ def parse_args() -> argparse.Namespace:
         help="Preview matches and Wikipedia titles without writing anything",
     )
     return parser.parse_args()
-
-
-def resolve_paths(profile: str) -> tuple[Path, Path]:
-    profile_dir = ANKI2_ROOT / profile
-    col_path = profile_dir / "collection.anki2"
-    media_dir = profile_dir / "collection.media"
-    if not col_path.exists():
-        raise SystemExit(f"Collection not found: {col_path}")
-    if not media_dir.exists():
-        raise SystemExit(f"Media directory not found: {media_dir}")
-    return col_path, media_dir
-
-
-def ensure_anki_closed() -> None:
-    import subprocess
-
-    result = subprocess.run(["pgrep", "-x", "Anki"], capture_output=True)
-    if result.returncode == 0:
-        raise SystemExit("Anki is running. Close it first.")
 
 
 def load_title_map(path: str | None) -> dict[str, str]:
@@ -153,16 +136,15 @@ def image_extension(url: str) -> str:
     return ".jpg"
 
 
-def backup_collection(col_path: Path) -> Path:
-    backup_path = Path(str(col_path) + f".backup_{time.strftime('%Y%m%d_%H%M%S')}")
-    shutil.copy2(col_path, backup_path)
-    return backup_path
-
-
 def main() -> None:
     args = parse_args()
-    ensure_anki_closed()
-    col_path, media_dir = resolve_paths(args.anki_profile)
+    try:
+        ensure_anki_closed()
+        anki_paths = resolve_anki_paths(args.anki_profile, require_media=True)
+    except RuntimeError as e:
+        raise SystemExit(str(e))
+    col_path = anki_paths.collection
+    media_dir = anki_paths.media_dir
     title_map = load_title_map(args.title_map)
 
     col = Collection(str(col_path))

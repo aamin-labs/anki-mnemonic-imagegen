@@ -4,7 +4,6 @@
 import argparse
 import json
 import os
-import subprocess
 import sys
 import time
 from collections import Counter
@@ -15,10 +14,10 @@ from dotenv import load_dotenv
 
 # ── constants ─────────────────────────────────────────────────────────────────
 
-from common import ANKI_IO_DIR, PROJECT_DIR, _ANKI_PYTHON_DEFAULT
+from anki_backends import AnkiBackend, DirectAnkiBackend
+from common import PROJECT_DIR, _ANKI_PYTHON_DEFAULT, ensure_anki_closed, resolve_anki_paths
 
 STATE_DIR = PROJECT_DIR / "state"
-_ANKI2_ROOT = Path.home() / "Library" / "Application Support" / "Anki2"
 
 # ── workflow registry ──────────────────────────────────────────────────────────
 
@@ -28,95 +27,12 @@ from workflows.base import WorkflowError
 # ── helpers ───────────────────────────────────────────────────────────────────
 
 
-def resolve_anki_paths() -> tuple[str, str]:
-    """Resolve collection path and media dir from ANKI_PROFILE env or auto-detect."""
-    if not _ANKI2_ROOT.exists():
-        print(f"ERROR: Anki2 directory not found: {_ANKI2_ROOT}")
-        print("Is Anki installed? Set ANKI_PROFILE= in .env for a custom location.")
-        sys.exit(1)
-
-    profile = os.environ.get("ANKI_PROFILE", "").strip()
-    if profile:
-        profile_dir = _ANKI2_ROOT / profile
-    else:
-        candidates = [
-            d for d in sorted(_ANKI2_ROOT.iterdir())
-            if d.is_dir() and d.name != "addons21"
-        ]
-        if not candidates:
-            print(f"ERROR: No Anki profiles found in {_ANKI2_ROOT}")
-            print("Set ANKI_PROFILE=<your-profile-name> in .env")
-            sys.exit(1)
-        profile_dir = candidates[0]
-        print(f"Auto-detected Anki profile: {profile_dir.name}")
-
-    col_path = str(profile_dir / "collection.anki2")
-    media_dir = str(profile_dir / "collection.media")
-
-    if not Path(col_path).exists():
-        print(f"ERROR: Collection not found: {col_path}")
-        print(f"  Available profiles: {', '.join(d.name for d in candidates) or '(none found)'}")
-        print("  Fix: set ANKI_PROFILE=<profile-name> in .env")
-        sys.exit(1)
-
-    return col_path, media_dir
-
-
-def check_anki_not_running():
-    result = subprocess.run(["pgrep", "-x", "Anki"], capture_output=True)
-    if result.returncode == 0:
-        print("ERROR: Anki is running. Please close it before running the pipeline.")
-        sys.exit(1)
-
-
-def run_anki_script(anki_python: str, script_name: str, extra_args: list[str]) -> str:
-    """Run an anki_io script via Anki's bundled Python. Returns stdout."""
-    cmd = [anki_python, str(ANKI_IO_DIR / script_name)] + extra_args
-    result = subprocess.run(cmd, capture_output=True, text=True)
-    if result.returncode != 0:
-        print(f"ERROR in {script_name}:\n{result.stderr}", file=sys.stderr)
-        sys.exit(1)
-    return result.stdout
-
-
-def read_notes(anki_python: str, col_path: str, query: str, fields: list[str]) -> dict:
-    raw = run_anki_script(anki_python, "read_notes.py", [
-        "--col", col_path,
-        "--query", query,
-        "--fields", ",".join(fields),
-    ])
-    return json.loads(raw)
-
-
 def _resolve_tag(cli_value: str | None, workflow, kind: str) -> str:
     """Return the tag to use: CLI value if explicitly set, else workflow default, else ''."""
     if cli_value is not None:
         return cli_value  # explicit '' disables the default
     attr = "DEFAULT_ADD_TAG" if kind == "add" else "DEFAULT_REMOVE_TAG"
     return getattr(workflow, attr, "") if workflow else ""
-
-
-def write_notes(anki_python: str, col_path: str, state_path: Path, remove_tag: str = "", add_tag: str = ""):
-    extra = []
-    if remove_tag:
-        extra += ["--remove-tag", remove_tag]
-    if add_tag:
-        extra += ["--add-tag", add_tag]
-    out = run_anki_script(anki_python, "write_notes.py", [
-        "--col", col_path, "--state", str(state_path), *extra,
-    ])
-    if out.strip():
-        print(out.rstrip())
-
-
-def add_field(anki_python: str, col_path: str, notetype_id: int, field_name: str):
-    out = run_anki_script(anki_python, "add_field.py", [
-        "--col", col_path,
-        "--notetype-id", str(notetype_id),
-        "--field-name", field_name,
-    ])
-    if out.strip():
-        print(out.rstrip())
 
 
 def save_state(state_path: Path, state: dict):
@@ -132,10 +48,44 @@ def _fmt_duration(secs: float) -> str:
     return f"{m}m {s:02d}s"
 
 
+def _read_notes(backend: AnkiBackend, query: str, fields: list[str]) -> dict:
+    try:
+        return backend.read_notes(query, fields)
+    except RuntimeError as e:
+        print(str(e), file=sys.stderr)
+        sys.exit(1)
+
+
+def _write_notes(
+    backend: AnkiBackend,
+    state_path: Path,
+    *,
+    remove_tag: str = "",
+    add_tag: str = "",
+) -> None:
+    try:
+        out = backend.write_notes(state_path, remove_tag=remove_tag, add_tag=add_tag)
+    except RuntimeError as e:
+        print(str(e), file=sys.stderr)
+        sys.exit(1)
+    if out.strip():
+        print(out.rstrip())
+
+
+def _add_field(backend: AnkiBackend, notetype_id: int, field_name: str) -> None:
+    try:
+        out = backend.add_field(notetype_id, field_name)
+    except RuntimeError as e:
+        print(str(e), file=sys.stderr)
+        sys.exit(1)
+    if out.strip():
+        print(out.rstrip())
+
+
 # ── verify ────────────────────────────────────────────────────────────────────
 
 
-def _run_verify(state_file: str, anki_python: str, col_path: str):
+def _run_verify(state_file: str, backend: AnkiBackend):
     """Re-read processed notes from Anki and confirm output fields are non-empty."""
     state_path = Path(state_file)
     with open(state_path) as f:
@@ -143,8 +93,8 @@ def _run_verify(state_file: str, anki_python: str, col_path: str):
 
     output_fields = state.get("output_fields", [])
     if not output_fields:
-        print("ERROR: state file has no output_fields — cannot verify.")
-        sys.exit(1)
+        print("State file has no output fields to verify.")
+        return
 
     processed = {nid: entry for nid, entry in state["notes"].items() if entry["status"] == "processed"}
     if not processed:
@@ -152,7 +102,7 @@ def _run_verify(state_file: str, anki_python: str, col_path: str):
         return
 
     print(f"Verifying {len(processed)} processed note(s) — fields: {output_fields}")
-    anki_data = read_notes(anki_python, col_path, state["query"], output_fields)
+    anki_data = _read_notes(backend, state["query"], output_fields)
     note_fields = {nid: info["fields"] for nid, info in anki_data["notes"].items()}
 
     ok = failed = 0
@@ -266,11 +216,17 @@ def main():
 
     load_dotenv()
 
-    col_path, media_dir = resolve_anki_paths()
-    check_anki_not_running()
+    try:
+        anki_paths = resolve_anki_paths(os.environ.get("ANKI_PROFILE", "").strip() or None)
+        ensure_anki_closed()
+    except RuntimeError as e:
+        print(f"ERROR: {e}")
+        sys.exit(1)
+    backend = DirectAnkiBackend(args.anki_python, anki_paths.collection)
+    media_dir = str(anki_paths.media_dir)
 
     if args.verify:
-        _run_verify(args.verify, args.anki_python, col_path)
+        _run_verify(args.verify, backend)
         return
 
     if args.list_fields:
@@ -278,7 +234,7 @@ def main():
             print("ERROR: --list-fields requires --query")
             sys.exit(1)
         print(f"Querying: {args.query}")
-        anki_data = read_notes(args.anki_python, col_path, args.query, ["Front"])
+        anki_data = _read_notes(backend, args.query, ["Front"])
         if not anki_data["notes"]:
             print("No notes matched that query.")
             sys.exit(0)
@@ -290,6 +246,8 @@ def main():
 
     WorkflowClass = WORKFLOWS[args.workflow]
     print(f"Workflow: {args.workflow}")
+    if WorkflowClass.DESCRIPTION:
+        print(f"Description: {WorkflowClass.DESCRIPTION}")
 
     note_fields_cache: dict[str, dict[str, str]] = {}
 
@@ -311,7 +269,7 @@ def main():
         print(f"Resuming {state_path} — {len(pending_nids)} pending notes")
         if pending_nids:
             all_fields = list(dict.fromkeys(input_fields + output_fields))
-            anki_data = read_notes(args.anki_python, col_path, state["query"], all_fields)
+            anki_data = _read_notes(backend, state["query"], all_fields)
             note_fields_cache = {nid: info["fields"] for nid, info in anki_data["notes"].items()}
     else:
         input_fields = (
@@ -324,9 +282,11 @@ def main():
             if args.output_fields
             else WorkflowClass.OUTPUT_FIELDS
         )
+        if not WorkflowClass.WRITES_FIELDS:
+            output_fields = []
         all_fields = list(dict.fromkeys(input_fields + output_fields))
         print(f"Querying: {args.query}")
-        anki_data = read_notes(args.anki_python, col_path, args.query, all_fields)
+        anki_data = _read_notes(backend, args.query, all_fields)
         notes_data = anki_data["notes"]
         notetypes = anki_data["notetypes"]
         print(f"Found {len(notes_data)} notes")
@@ -351,7 +311,7 @@ def main():
                     print("Aborting.")
                     sys.exit(1)
                 for mid_str, _, field in missing:
-                    add_field(args.anki_python, col_path, int(mid_str), field)
+                    _add_field(backend, int(mid_str), field)
 
         STATE_DIR.mkdir(exist_ok=True)
         ts = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -466,14 +426,14 @@ def main():
         save_state(state_path, state)
 
         if processed_since_write >= args.write_batch_size:
-            write_notes(args.anki_python, col_path, state_path, remove_tag=write_remove_tag, add_tag=write_add_tag)
+            _write_notes(backend, state_path, remove_tag=write_remove_tag, add_tag=write_add_tag)
             processed_since_write = 0
 
     save_state(state_path, state)
 
     # flush remainder
     if processed_since_write > 0 and not args.dry_run:
-        write_notes(args.anki_python, col_path, state_path, remove_tag=write_remove_tag, add_tag=write_add_tag)
+        _write_notes(backend, state_path, remove_tag=write_remove_tag, add_tag=write_add_tag)
 
     if workflow:
         workflow.teardown()
@@ -497,8 +457,9 @@ def main():
         print(f"\nRetry failures with:")
         print(f"  python3 run_pipeline.py --resume {state_path.resolve()}")
 
-    print(f"\nVerify writes with:")
-    print(f"  python3 run_pipeline.py --verify {state_path.resolve()}")
+    if output_fields:
+        print(f"\nVerify writes with:")
+        print(f"  python3 run_pipeline.py --verify {state_path.resolve()}")
 
 
 if __name__ == "__main__":

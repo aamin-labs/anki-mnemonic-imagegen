@@ -22,6 +22,8 @@ _DEFAULT_PROMPT_FILE = "prompt-visual-designer.md"
 
 class MnemonicImageWorkflow(EnhancementWorkflow):
     WORKFLOW_NAME = "mnemonic_image"
+    DESCRIPTION = "Visual mnemonic image"
+    DEFAULT_FILTER = "tag:need-image"
     INPUT_FIELDS = ["Front", "Back"]
     OUTPUT_FIELDS = ["Mnemonic", "Encoding"]
     REQUIRED_ENV_KEYS = ["ANTHROPIC_API_KEY", "GEMINI_API_KEY"]

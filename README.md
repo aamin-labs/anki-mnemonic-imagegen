@@ -102,18 +102,19 @@ Applies minimal HTML formatting to existing card fields using Claude.
 - `<b>bold</b>` — key terms, concept names, proper nouns
 - `<br>` — line breaks between logically distinct parts of a multi-part answer
 - `<ul><li>` — bullet lists for 3+ enumerable items only
-- For `Question`,`Answer` runs only: `<u>underline</u>` precision-critical terms in answers
 
 **Default fields:** `Answer`, `Explanation` (in-place update — same fields read and written back)
 
-To format `Question` and `Answer` fields for visual scanning, run with explicit fields. This bolds 1-2 key terms in the question, bolds 1-2 must-have answer terms, and underlines 1-2 precision-critical answer terms.
+### `format_qa_fields`
+
+Formats `Question` and `Answer` fields for visual scanning. This bolds 1-2 key terms in the question, bolds 1-2 must-have answer terms, and underlines 1-2 precision-critical answer terms in the answer.
+
+**Default fields:** Input: `Question`, `Answer` → Output: `Question`, `Answer`
 
 ```bash
 .venv/bin/python3 run_pipeline.py \
   --query 'deck:"My Deck" -tag:fields-formatted -is:suspended' \
-  --workflow format_fields \
-  --input-fields Question,Answer \
-  --output-fields Question,Answer
+  --workflow format_qa_fields
 ```
 
 **Tags:** Adds `fields-formatted` to every processed note automatically.
@@ -177,6 +178,12 @@ Two Python environments are kept strictly separate:
 - **Anki's bundled Python** (`AnkiProgramFiles/.venv/bin/python3.13`) — the only process that touches `collection.anki2`
 
 This separation avoids SQLite version mismatches that would corrupt the Anki database.
+
+Anki access goes through a small backend boundary:
+
+- `anki_backends.DirectAnkiBackend` wraps the current `anki_io/*.py` subprocess scripts.
+- The pipeline and TUI call methods like `read_notes()`, `write_notes()`, `add_field()`, and `list_decks()` instead of shelling out directly.
+- A future AnkiConnect backend can implement the same methods without changing workflow code.
 
 ## Creating Custom Workflows
 

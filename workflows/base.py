@@ -7,9 +7,14 @@ class WorkflowError(Exception):
 
 class EnhancementWorkflow(ABC):
     WORKFLOW_NAME: str
+    DESCRIPTION: str = ""
+    DEFAULT_FILTER: str = ""
     INPUT_FIELDS: list[str]
     OUTPUT_FIELDS: list[str]
-    REQUIRED_ENV_KEYS: list[str] = ["ANTHROPIC_API_KEY", "GEMINI_API_KEY"]
+    REQUIRED_ENV_KEYS: list[str] = []
+    WRITES_FIELDS: bool = True
+    DEFAULT_ADD_TAG = ""
+    DEFAULT_REMOVE_TAG = ""
 
     def __init__(self, config: dict):
         self.config = config

@@ -76,6 +76,8 @@ def _validate_question_answer_output(output: dict[str, str]) -> list[str]:
 
 class FormatFieldsWorkflow(EnhancementWorkflow):
     WORKFLOW_NAME = "format_fields"
+    DESCRIPTION = "Minimal HTML formatting for existing fields"
+    DEFAULT_FILTER = "-tag:fields-formatted -is:suspended"
     INPUT_FIELDS = ["Answer", "Explanation"]
     OUTPUT_FIELDS = ["Answer", "Explanation"]
     REQUIRED_ENV_KEYS = ["ANTHROPIC_API_KEY"]
@@ -101,9 +103,6 @@ class FormatFieldsWorkflow(EnhancementWorkflow):
         return False, ""
 
     def process_note(self, note_id: str, fields: dict[str, str]) -> dict[str, str]:
-        if self._uses_question_answer_fields():
-            return self._process_question_answer(note_id, fields)
-
         output = {}
         for field in self._output_fields:
             val = fields.get(field, "").strip()
@@ -127,9 +126,6 @@ class FormatFieldsWorkflow(EnhancementWorkflow):
             raise WorkflowError("All input fields are empty")
 
         return output
-
-    def _uses_question_answer_fields(self) -> bool:
-        return self._output_fields == ["Question", "Answer"]
 
     def _process_question_answer(self, note_id: str, fields: dict[str, str]) -> dict[str, str]:
         question = _strip_emphasis_tags(fields.get("Question", ""))
@@ -190,3 +186,14 @@ class FormatFieldsWorkflow(EnhancementWorkflow):
             )
 
         raise WorkflowError("; ".join(last_errors))
+
+
+class FormatQuestionAnswerWorkflow(FormatFieldsWorkflow):
+    WORKFLOW_NAME = "format_qa_fields"
+    DESCRIPTION = "Visual scanning markup for Question and Answer fields"
+    DEFAULT_FILTER = "-tag:fields-formatted -is:suspended"
+    INPUT_FIELDS = ["Question", "Answer"]
+    OUTPUT_FIELDS = ["Question", "Answer"]
+
+    def process_note(self, note_id: str, fields: dict[str, str]) -> dict[str, str]:
+        return self._process_question_answer(note_id, fields)

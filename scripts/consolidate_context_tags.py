@@ -21,14 +21,13 @@ from __future__ import annotations
 import argparse
 import html
 import re
-import shutil
-import subprocess
-import time
+import sys
 from collections import Counter
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from common import backup_collection, ensure_anki_closed, resolve_anki_paths
 
-ANKI2_ROOT = Path.home() / "Library" / "Application Support" / "Anki2"
 STABLE_TAGS = [
     "RAG",
     "Agents",
@@ -217,25 +216,6 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def ensure_anki_closed() -> None:
-    result = subprocess.run(["pgrep", "-x", "Anki"], capture_output=True)
-    if result.returncode == 0:
-        raise SystemExit("Anki is running. Close it first.")
-
-
-def resolve_collection_path(profile: str) -> Path:
-    col_path = ANKI2_ROOT / profile / "collection.anki2"
-    if not col_path.exists():
-        raise SystemExit(f"Collection not found: {col_path}")
-    return col_path
-
-
-def backup_collection(col_path: Path) -> Path:
-    backup_path = Path(str(col_path) + f".backup_{time.strftime('%Y%m%d_%H%M%S')}")
-    shutil.copy2(col_path, backup_path)
-    return backup_path
-
-
 def normalize_context(raw: str) -> str:
     unescaped = html.unescape(raw or "")
     without_html = HTML_RE.sub(" ", unescaped)
@@ -306,8 +286,11 @@ def main() -> None:
     from anki.collection import Collection
 
     args = parse_args()
-    ensure_anki_closed()
-    col_path = resolve_collection_path(args.anki_profile)
+    try:
+        ensure_anki_closed()
+        col_path = resolve_anki_paths(args.anki_profile).collection
+    except RuntimeError as e:
+        raise SystemExit(str(e))
 
     col = Collection(str(col_path))
     try:
