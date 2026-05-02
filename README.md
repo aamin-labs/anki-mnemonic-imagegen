@@ -102,8 +102,19 @@ Applies minimal HTML formatting to existing card fields using Claude.
 - `<b>bold</b>` — key terms, concept names, proper nouns
 - `<br>` — line breaks between logically distinct parts of a multi-part answer
 - `<ul><li>` — bullet lists for 3+ enumerable items only
+- For `Question`,`Answer` runs only: `<u>underline</u>` precision-critical terms in answers
 
 **Default fields:** `Answer`, `Explanation` (in-place update — same fields read and written back)
+
+To format `Question` and `Answer` fields for visual scanning, run with explicit fields. This bolds 1-2 key terms in the question, bolds 1-2 must-have answer terms, and underlines 1-2 precision-critical answer terms.
+
+```bash
+.venv/bin/python3 run_pipeline.py \
+  --query 'deck:"My Deck" -tag:fields-formatted -is:suspended' \
+  --workflow format_fields \
+  --input-fields Question,Answer \
+  --output-fields Question,Answer
+```
 
 **Tags:** Adds `fields-formatted` to every processed note automatically.
 
