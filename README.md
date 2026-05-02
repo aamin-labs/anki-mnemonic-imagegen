@@ -107,7 +107,7 @@ Applies minimal HTML formatting to existing card fields using Claude.
 
 ### `format_qa_fields`
 
-Formats `Question` and `Answer` fields for visual scanning. This bolds 1-2 key terms in the question, bolds 1-2 must-have answer terms, and underlines 1-2 precision-critical answer terms in the answer.
+Formats `Question` and `Answer` fields for visual scanning. This bolds 1-2 key terms in the question, bolds 1-2 must-have answer terms, and underlines only 1-2 individual precision-critical words total in the answer. It should never underline phrases or clauses.
 
 **Default fields:** Input: `Question`, `Answer` → Output: `Question`, `Answer`
 

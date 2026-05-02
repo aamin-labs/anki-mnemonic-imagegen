@@ -34,12 +34,14 @@ Return ONLY a JSON object with exactly these string keys: "Question", "Answer".
 Formatting goal:
 - In the Question, bold the 1 or 2 key term(s) the learner should focus on.
 - In the Answer, bold the 1 or 2 term(s) that must be present for the answer to count as correct.
-- In the Answer only, underline 1 or 2 precision-critical terms that show depth, specificity, or conceptual clarity.
+- In the Answer only, underline exactly 1 or 2 individual words total that show depth, specificity, or conceptual clarity.
 
 Rules:
 - Preserve the original wording exactly. Do not add, remove, rewrite, explain, or reorder content.
 - Add only <b>, </b>, <u>, and </u> tags.
 - Preserve any existing HTML tags already present in the fields.
+- Never over-underline: underline one word when possible, and two words only when both are truly precision-critical.
+- Do not underline phrases, clauses, or examples. Across the whole Answer, the total underlined text must be only one or two words.
 - Do not bold or underline whole sentences unless the field is only a sentence fragment and no shorter term works.
 - Prefer one term over two when one term carries the concept.
 - Avoid overlapping tags unless the same term is both must-have and precision-critical.
@@ -56,12 +58,20 @@ def _count_tag(value: str, tag: str) -> int:
     return len(re.findall(rf"<{tag}>", value, flags=re.IGNORECASE))
 
 
+def _count_underlined_words(value: str) -> int:
+    words = 0
+    for match in re.finditer(r"<u>(.*?)</u>", value, flags=re.IGNORECASE | re.DOTALL):
+        words += len(re.findall(r"\b\w+\b", match.group(1)))
+    return words
+
+
 def _validate_question_answer_output(output: dict[str, str]) -> list[str]:
     errors = []
     question_bolds = _count_tag(output["Question"], "b")
     question_underlines = _count_tag(output["Question"], "u")
     answer_bolds = _count_tag(output["Answer"], "b")
     answer_underlines = _count_tag(output["Answer"], "u")
+    answer_underlined_words = _count_underlined_words(output["Answer"])
 
     if question_bolds > 2:
         errors.append(f"Question has {question_bolds} bold spans; use at most 2")
@@ -71,6 +81,10 @@ def _validate_question_answer_output(output: dict[str, str]) -> list[str]:
         errors.append(f"Answer has {answer_bolds} bold spans; use at most 2")
     if answer_underlines > 2:
         errors.append(f"Answer has {answer_underlines} underline spans; use at most 2")
+    if answer_underlined_words > 2:
+        errors.append(
+            f"Answer underlines {answer_underlined_words} words; underline only 1 or 2 individual words total"
+        )
     return errors
 
 
