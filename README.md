@@ -121,6 +121,21 @@ Formats `Question` and `Answer` fields for visual scanning. This bolds 1-2 key t
 
 **Skip logic:** Skips suspended cards always. Skips notes already tagged `fields-formatted`. Skips fields that already contain HTML tags (secondary guard for cards formatted outside the pipeline).
 
+### `format_cleanup`
+
+Cleanup pass for already-written cards. Fixes over-underlining, converts multiple answer items into HTML lists, and moves long parenthetical answer clutter into `Explanation`.
+
+**Default fields:** Input: `Question`, `Answer`, `Explanation` → Output: `Answer`, `Explanation`
+
+```bash
+.venv/bin/python3 run_pipeline.py \
+  --query 'flag:4 -tag:format-cleaned' \
+  --workflow format_cleanup \
+  --limit 5
+```
+
+**Tags:** Adds `format-cleaned` to every processed note automatically. Keep flags as the human review queue and clear them manually after spot-checking.
+
 **First run:**
 ```bash
 .venv/bin/python3 run_pipeline.py \

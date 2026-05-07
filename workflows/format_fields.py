@@ -11,6 +11,11 @@ _HTML_TAG_RE = re.compile(r"<(b|br|ul|li|u|/b|/ul|/li|/u)\b", re.IGNORECASE)
 _JSON_OBJECT_RE = re.compile(r"\{.*\}", re.DOTALL)
 _BOLD_RE = re.compile(r"</?b>", re.IGNORECASE)
 _UNDERLINE_RE = re.compile(r"</?u>", re.IGNORECASE)
+_INLINE_LIST_MARKER_RE = re.compile(
+    r"(\(\s*[0-9a-z]\s*\)|(?:^|[;:]\s*)[0-9a-z][.)]\s+).+?"
+    r"(\(\s*[0-9a-z]\s*\)|(?:[;:]\s*)[0-9a-z][.)]\s+)",
+    re.IGNORECASE | re.DOTALL,
+)
 
 _SYSTEM = """\
 You are an HTML formatter for Anki flashcard fields. Apply minimal, semantic HTML to the given text using only these three rules:
@@ -48,6 +53,30 @@ Rules:
 - If a field is empty, return it as an empty string.\
 """
 
+_FORMAT_CLEANUP_SYSTEM = """\
+You clean up already-written Anki flashcard Answer and Explanation fields.
+
+Return ONLY a JSON object with exactly these string keys: "Answer", "Explanation".
+
+Cleanup goals:
+- Remove over-underlining. In Answer, underline only 1 or 2 individual precision words total.
+- Format multiple answer items as an HTML list using <ul><li>...</li></ul>.
+- Move explanatory bracketed or parenthetical text out of Answer and into Explanation when it is extra context, not the answer itself.
+
+Rules:
+- Preserve the original meaning and wording. Minimal edits only.
+- Do not add new facts.
+- Use only these HTML tags in new markup: <b>, </b>, <u>, </u>, <br>, <ul>, </ul>, <li>, </li>.
+- Preserve useful existing bold terms.
+- Do not underline phrases, clauses, examples, or whole sentences.
+- Do not underline when Answer is just a set of equivalent items, such as three techniques, examples, causes, or components. Underlining one equal item creates fake importance.
+- If Answer has multiple paired/contrasted items, use a list even when there are only 2 items.
+- Convert inline markers like (1)/(2), 1./2., a)/b), or semicolon-separated answer items into list items.
+- Keep Answer concise. Put extra context, clarifications, and long bracketed/parenthetical details in Explanation.
+- If Explanation already has content, append moved context after it with <br><br>.
+- If a field is empty, return it as an empty string.\
+"""
+
 
 def _strip_emphasis_tags(value: str) -> str:
     value = _BOLD_RE.sub("", value)
@@ -63,6 +92,37 @@ def _count_underlined_words(value: str) -> int:
     for match in re.finditer(r"<u>(.*?)</u>", value, flags=re.IGNORECASE | re.DOTALL):
         words += len(re.findall(r"\b\w+\b", match.group(1)))
     return words
+
+
+def _has_underlined_phrase(value: str) -> bool:
+    for match in re.finditer(r"<u>(.*?)</u>", value, flags=re.IGNORECASE | re.DOTALL):
+        text = re.sub(r"<[^>]+>", "", match.group(1)).strip()
+        words = re.findall(r"\b\w+\b", text)
+        if len(words) != 1:
+            return True
+    return False
+
+
+def _has_long_bracketed_detail(value: str) -> bool:
+    for match in re.finditer(r"[\(\[](.*?)[\)\]]", value, flags=re.DOTALL):
+        if len(re.findall(r"\b\w+\b", match.group(1))) >= 4:
+            return True
+    return False
+
+
+def _has_inline_list_markers(value: str) -> bool:
+    return bool(_INLINE_LIST_MARKER_RE.search(value))
+
+
+def _is_bare_equivalent_item_list(value: str) -> bool:
+    plain = re.sub(r"</?(b|u)>", "", value, flags=re.IGNORECASE).strip()
+    if re.search(r"<(br|ul|li)\b", plain, flags=re.IGNORECASE):
+        return False
+    if re.search(r"\b(is|are|means|mean|=|:)\b|=", plain, flags=re.IGNORECASE):
+        return False
+
+    items = [item.strip(" .;") for item in re.split(r",|\s+and\s+", plain) if item.strip(" .;")]
+    return len(items) >= 3 and all(len(re.findall(r"\b\w+\b", item)) <= 4 for item in items)
 
 
 def _validate_question_answer_output(output: dict[str, str]) -> list[str]:
@@ -81,10 +141,40 @@ def _validate_question_answer_output(output: dict[str, str]) -> list[str]:
         errors.append(f"Answer has {answer_bolds} bold spans; use at most 2")
     if answer_underlines > 2:
         errors.append(f"Answer has {answer_underlines} underline spans; use at most 2")
+    if _has_underlined_phrase(answer):
+        errors.append("Answer underlines a phrase; underline only individual words")
+    if answer_underlines and _is_bare_equivalent_item_list(answer):
+        errors.append("Answer is a set of equivalent items; do not underline any one item")
     if answer_underlined_words > 2:
         errors.append(
             f"Answer underlines {answer_underlined_words} words; underline only 1 or 2 individual words total"
         )
+    return errors
+
+
+def _validate_format_cleanup_output(output: dict[str, str]) -> list[str]:
+    errors = []
+    answer = output["Answer"]
+    explanation = output["Explanation"]
+    answer_underlines = _count_tag(answer, "u")
+    answer_underlined_words = _count_underlined_words(answer)
+
+    if _count_tag(explanation, "u"):
+        errors.append("Explanation must not contain underline tags")
+    if answer_underlines > 2:
+        errors.append(f"Answer has {answer_underlines} underline spans; use at most 2")
+    if _has_underlined_phrase(answer):
+        errors.append("Answer underlines a phrase; underline only individual words")
+    if answer_underlines and _is_bare_equivalent_item_list(answer):
+        errors.append("Answer is a set of equivalent items; do not underline any one item")
+    if answer_underlined_words > 2:
+        errors.append(
+            f"Answer underlines {answer_underlined_words} words; underline only 1 or 2 individual words total"
+        )
+    if _has_inline_list_markers(answer):
+        errors.append("Answer still has inline list markers; convert them to an HTML list")
+    if _has_long_bracketed_detail(answer):
+        errors.append("Answer still has long bracketed detail; move extra context to Explanation")
     return errors
 
 
@@ -201,6 +291,70 @@ class FormatFieldsWorkflow(EnhancementWorkflow):
 
         raise WorkflowError("; ".join(last_errors))
 
+    def _process_format_cleanup(self, note_id: str, fields: dict[str, str]) -> dict[str, str]:
+        answer = fields.get("Answer", "")
+        explanation = fields.get("Explanation", "")
+
+        if not answer.strip() and not explanation.strip():
+            raise WorkflowError("Answer and Explanation are empty")
+
+        payload = json.dumps(
+            {
+                "Question": fields.get("Question", ""),
+                "Answer": answer,
+                "Explanation": explanation,
+            },
+            ensure_ascii=False,
+        )
+        last_errors = []
+        messages = [{"role": "user", "content": payload}]
+        for _ in range(2):
+            try:
+                msg = self._client.messages.create(
+                    model=_MODEL,
+                    max_tokens=2048,
+                    system=_FORMAT_CLEANUP_SYSTEM,
+                    messages=messages,
+                )
+            except anthropic.APIError as e:
+                raise WorkflowError(f"Claude API error: {e}")
+
+            text = msg.content[0].text.strip()
+            match = _JSON_OBJECT_RE.search(text)
+            if not match:
+                last_errors = ["Formatter returned non-JSON output"]
+            else:
+                try:
+                    output = json.loads(match.group(0))
+                except json.JSONDecodeError as e:
+                    last_errors = [f"Formatter returned invalid JSON: {e}"]
+                else:
+                    missing = [
+                        field
+                        for field in self._output_fields
+                        if field not in output or not isinstance(output[field], str)
+                    ]
+                    if missing:
+                        last_errors = [f"Formatter omitted string field(s): {', '.join(missing)}"]
+                    else:
+                        output = {field: output[field].strip() for field in self._output_fields}
+                        last_errors = _validate_format_cleanup_output(output)
+                        if not last_errors:
+                            return output
+
+            messages.extend(
+                [
+                    {"role": "assistant", "content": text},
+                    {
+                        "role": "user",
+                        "content": "Fix only these validation errors and return the JSON again: "
+                        + "; ".join(last_errors),
+                    },
+                ]
+            )
+
+        raise WorkflowError("; ".join(last_errors))
+
 
 class FormatQuestionAnswerWorkflow(FormatFieldsWorkflow):
     WORKFLOW_NAME = "format_qa_fields"
@@ -211,3 +365,20 @@ class FormatQuestionAnswerWorkflow(FormatFieldsWorkflow):
 
     def process_note(self, note_id: str, fields: dict[str, str]) -> dict[str, str]:
         return self._process_question_answer(note_id, fields)
+
+
+class FormatCleanupWorkflow(FormatFieldsWorkflow):
+    WORKFLOW_NAME = "format_cleanup"
+    DESCRIPTION = "Cleanup pass for over-underlining, lists, and parenthetical answer clutter"
+    DEFAULT_FILTER = "-tag:format-cleaned -is:suspended"
+    INPUT_FIELDS = ["Question", "Answer", "Explanation"]
+    OUTPUT_FIELDS = ["Answer", "Explanation"]
+    DEFAULT_ADD_TAG = "format-cleaned"
+
+    def should_skip(self, note_id: str, fields: dict[str, str]) -> tuple[bool, str]:
+        if fields.get("__suspended__"):
+            return True, "card is suspended"
+        return False, ""
+
+    def process_note(self, note_id: str, fields: dict[str, str]) -> dict[str, str]:
+        return self._process_format_cleanup(note_id, fields)
