@@ -1,4 +1,18 @@
-from workflows.format_fields import _validate_format_cleanup_output
+from workflows.format_fields import (
+    _validate_format_cleanup_output,
+    _validate_question_answer_output,
+)
+
+
+def test_question_answer_validation_rejects_underlined_phrases():
+    output = {
+        "Question": "What is <b>learning rate</b>?",
+        "Answer": "The <u>step size</u> for weight updates.",
+    }
+
+    assert "underline only individual words" in " ".join(
+        _validate_question_answer_output(output)
+    )
 
 
 def test_format_cleanup_accepts_short_precision_underlines():

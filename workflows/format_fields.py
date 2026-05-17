@@ -127,11 +127,12 @@ def _is_bare_equivalent_item_list(value: str) -> bool:
 
 def _validate_question_answer_output(output: dict[str, str]) -> list[str]:
     errors = []
+    answer = output["Answer"]
     question_bolds = _count_tag(output["Question"], "b")
     question_underlines = _count_tag(output["Question"], "u")
-    answer_bolds = _count_tag(output["Answer"], "b")
-    answer_underlines = _count_tag(output["Answer"], "u")
-    answer_underlined_words = _count_underlined_words(output["Answer"])
+    answer_bolds = _count_tag(answer, "b")
+    answer_underlines = _count_tag(answer, "u")
+    answer_underlined_words = _count_underlined_words(answer)
 
     if question_bolds > 2:
         errors.append(f"Question has {question_bolds} bold spans; use at most 2")
@@ -231,25 +232,15 @@ class FormatFieldsWorkflow(EnhancementWorkflow):
 
         return output
 
-    def _process_question_answer(self, note_id: str, fields: dict[str, str]) -> dict[str, str]:
-        question = _strip_emphasis_tags(fields.get("Question", ""))
-        answer = _strip_emphasis_tags(fields.get("Answer", ""))
-
-        if not question.strip() and not answer.strip():
-            raise WorkflowError("Question and Answer are empty")
-
-        payload = json.dumps(
-            {"Question": question, "Answer": answer},
-            ensure_ascii=False,
-        )
+    def _call_json_formatter(self, system: str, payload: dict[str, str], validator) -> dict[str, str]:
         last_errors = []
-        messages = [{"role": "user", "content": payload}]
+        messages = [{"role": "user", "content": json.dumps(payload, ensure_ascii=False)}]
         for _ in range(2):
             try:
                 msg = self._client.messages.create(
                     model=_MODEL,
                     max_tokens=2048,
-                    system=_QUESTION_ANSWER_SYSTEM,
+                    system=system,
                     messages=messages,
                 )
             except anthropic.APIError as e:
@@ -261,20 +252,20 @@ class FormatFieldsWorkflow(EnhancementWorkflow):
                 last_errors = ["Formatter returned non-JSON output"]
             else:
                 try:
-                    output = json.loads(match.group(0))
+                    raw_output = json.loads(match.group(0))
                 except json.JSONDecodeError as e:
                     last_errors = [f"Formatter returned invalid JSON: {e}"]
                 else:
                     missing = [
                         field
                         for field in self._output_fields
-                        if field not in output or not isinstance(output[field], str)
+                        if field not in raw_output or not isinstance(raw_output[field], str)
                     ]
                     if missing:
                         last_errors = [f"Formatter omitted string field(s): {', '.join(missing)}"]
                     else:
-                        output = {field: output[field].strip() for field in self._output_fields}
-                        last_errors = _validate_question_answer_output(output)
+                        output = {field: raw_output[field].strip() for field in self._output_fields}
+                        last_errors = validator(output)
                         if not last_errors:
                             return output
 
@@ -290,6 +281,19 @@ class FormatFieldsWorkflow(EnhancementWorkflow):
             )
 
         raise WorkflowError("; ".join(last_errors))
+
+    def _process_question_answer(self, note_id: str, fields: dict[str, str]) -> dict[str, str]:
+        question = _strip_emphasis_tags(fields.get("Question", ""))
+        answer = _strip_emphasis_tags(fields.get("Answer", ""))
+
+        if not question.strip() and not answer.strip():
+            raise WorkflowError("Question and Answer are empty")
+
+        return self._call_json_formatter(
+            _QUESTION_ANSWER_SYSTEM,
+            {"Question": question, "Answer": answer},
+            _validate_question_answer_output,
+        )
 
     def _process_format_cleanup(self, note_id: str, fields: dict[str, str]) -> dict[str, str]:
         answer = fields.get("Answer", "")
@@ -298,62 +302,15 @@ class FormatFieldsWorkflow(EnhancementWorkflow):
         if not answer.strip() and not explanation.strip():
             raise WorkflowError("Answer and Explanation are empty")
 
-        payload = json.dumps(
+        return self._call_json_formatter(
+            _FORMAT_CLEANUP_SYSTEM,
             {
                 "Question": fields.get("Question", ""),
                 "Answer": answer,
                 "Explanation": explanation,
             },
-            ensure_ascii=False,
+            _validate_format_cleanup_output,
         )
-        last_errors = []
-        messages = [{"role": "user", "content": payload}]
-        for _ in range(2):
-            try:
-                msg = self._client.messages.create(
-                    model=_MODEL,
-                    max_tokens=2048,
-                    system=_FORMAT_CLEANUP_SYSTEM,
-                    messages=messages,
-                )
-            except anthropic.APIError as e:
-                raise WorkflowError(f"Claude API error: {e}")
-
-            text = msg.content[0].text.strip()
-            match = _JSON_OBJECT_RE.search(text)
-            if not match:
-                last_errors = ["Formatter returned non-JSON output"]
-            else:
-                try:
-                    output = json.loads(match.group(0))
-                except json.JSONDecodeError as e:
-                    last_errors = [f"Formatter returned invalid JSON: {e}"]
-                else:
-                    missing = [
-                        field
-                        for field in self._output_fields
-                        if field not in output or not isinstance(output[field], str)
-                    ]
-                    if missing:
-                        last_errors = [f"Formatter omitted string field(s): {', '.join(missing)}"]
-                    else:
-                        output = {field: output[field].strip() for field in self._output_fields}
-                        last_errors = _validate_format_cleanup_output(output)
-                        if not last_errors:
-                            return output
-
-            messages.extend(
-                [
-                    {"role": "assistant", "content": text},
-                    {
-                        "role": "user",
-                        "content": "Fix only these validation errors and return the JSON again: "
-                        + "; ".join(last_errors),
-                    },
-                ]
-            )
-
-        raise WorkflowError("; ".join(last_errors))
 
 
 class FormatQuestionAnswerWorkflow(FormatFieldsWorkflow):
