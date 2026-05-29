@@ -194,11 +194,7 @@ Two Python environments are kept strictly separate:
 
 This separation avoids SQLite version mismatches that would corrupt the Anki database.
 
-Anki access goes through a small backend boundary:
-
-- `anki_backends.DirectAnkiBackend` wraps the current `anki_io/*.py` subprocess scripts.
-- The pipeline and TUI call methods like `read_notes()`, `write_notes()`, `add_field()`, and `list_decks()` instead of shelling out directly.
-- A future AnkiConnect backend can implement the same methods without changing workflow code.
+Anki access goes through `anki_backends.DirectAnkiBackend`, which wraps the `anki_io/*.py` subprocess scripts. The pipeline calls methods like `read_notes()`, `write_notes()`, `add_field()`, and `list_decks()` instead of shelling out directly.
 
 ## Creating Custom Workflows
 

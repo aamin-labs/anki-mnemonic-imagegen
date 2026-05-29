@@ -14,7 +14,7 @@ from dotenv import load_dotenv
 
 # ── constants ─────────────────────────────────────────────────────────────────
 
-from anki_backends import AnkiBackend, DirectAnkiBackend
+from anki_backends import DirectAnkiBackend
 from common import PROJECT_DIR, _ANKI_PYTHON_DEFAULT, ensure_anki_closed, resolve_anki_paths
 
 STATE_DIR = PROJECT_DIR / "state"
@@ -48,7 +48,7 @@ def _fmt_duration(secs: float) -> str:
     return f"{m}m {s:02d}s"
 
 
-def _read_notes(backend: AnkiBackend, query: str, fields: list[str]) -> dict:
+def _read_notes(backend: DirectAnkiBackend, query: str, fields: list[str]) -> dict:
     try:
         return backend.read_notes(query, fields)
     except RuntimeError as e:
@@ -57,7 +57,7 @@ def _read_notes(backend: AnkiBackend, query: str, fields: list[str]) -> dict:
 
 
 def _write_notes(
-    backend: AnkiBackend,
+    backend: DirectAnkiBackend,
     state_path: Path,
     *,
     remove_tag: str = "",
@@ -72,7 +72,7 @@ def _write_notes(
         print(out.rstrip())
 
 
-def _add_field(backend: AnkiBackend, notetype_id: int, field_name: str) -> None:
+def _add_field(backend: DirectAnkiBackend, notetype_id: int, field_name: str) -> None:
     try:
         out = backend.add_field(notetype_id, field_name)
     except RuntimeError as e:
@@ -85,7 +85,7 @@ def _add_field(backend: AnkiBackend, notetype_id: int, field_name: str) -> None:
 # ── verify ────────────────────────────────────────────────────────────────────
 
 
-def _run_verify(state_file: str, backend: AnkiBackend):
+def _run_verify(state_file: str, backend: DirectAnkiBackend):
     """Re-read processed notes from Anki and confirm output fields are non-empty."""
     state_path = Path(state_file)
     with open(state_path) as f:
