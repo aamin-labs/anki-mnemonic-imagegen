@@ -94,6 +94,18 @@ The script auto-backs up `collection.anki2` before writing and refuses to run wh
 
 ## Workflows
 
+### `import_refactor`
+
+Refactors notes tagged by `anki-import --refactor` using `/Users/aamin/.agents/skills/anki-refactor/SKILL.md` as the card-design rule source.
+
+```bash
+.venv/bin/python3 run_pipeline.py \
+  --query 'tag:import-needs-refactor' \
+  --workflow import_refactor
+```
+
+**Tags:** removes `import-needs-refactor`, adds `import-refactored` after successful writes.
+
 ### `format_fields`
 
 Applies minimal HTML formatting to existing card fields using Claude.
