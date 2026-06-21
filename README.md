@@ -76,6 +76,22 @@ Fills an image field with small Wikipedia/Wikimedia thumbnails for people cards,
 
 The script auto-backs up `collection.anki2` before writing and refuses to run while Anki is open.
 
+### `scripts/fill_wiki_context_images.py`
+
+Fills the `Image` field for purple-flagged cards (`flag:6 -is:suspended`) with a small Wikipedia/Wikimedia page thumbnail. Uses the `Answer` field as the Wikipedia title/search text, writes the page URL to an existing `Source` field when present, clears `flag:6` after success, and adds `wiki-image-added`.
+
+**Dry run:**
+```bash
+/Users/aamin/Library/Application\ Support/AnkiProgramFiles/.venv/bin/python3.13 scripts/fill_wiki_context_images.py --dry-run
+```
+
+**Alfred wrapper:**
+```bash
+scripts/alfred_fill_wiki_context_images.sh
+```
+
+Useful flags: `--query`, `--title-field`, `--image-field`, `--source-field`, `--title-map`, `--overwrite`, `--keep-flag`.
+
 ### Pipeline CLI flags
 
 | Flag | Description |
