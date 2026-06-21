@@ -18,6 +18,7 @@ from __future__ import annotations
 import argparse
 import html
 import json
+import re
 import subprocess
 import sys
 import time
@@ -77,8 +78,8 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--title-field",
-        default="Answer",
-        help="Field used as the Wikipedia title/search text",
+        default="",
+        help="Optional single field to use as the Wikipedia title/search text; by default candidates are derived from Question/Answer/Context",
     )
     parser.add_argument(
         "--image-field", default="Image", help="Field to populate with <img src=...>"
@@ -222,6 +223,94 @@ def find_wiki_image(title: str, thumb_size: int) -> WikiImage | None:
     return wiki_thumb_info(search_title, thumb_size)
 
 
+def strip_html(value: str) -> str:
+    return html.unescape(re.sub(r"<[^>]+>", "", value)).strip()
+
+
+def bold_terms(value: str) -> list[str]:
+    return [
+        strip_html(match).strip(" —-:;,.?'")
+        for match in re.findall(r"<b>(.*?)</b>", value, flags=re.I | re.S)
+    ]
+
+
+def proper_noun_phrases(value: str) -> list[str]:
+    text = strip_html(value)
+    # Naive on purpose: catches card-specific anchors like "Dieppe Raid", "Churchill", "German command".
+    # Ceiling: no semantic ranking. Upgrade path: LLM/entity linker if this becomes noisy.
+    pattern = r"\b(?:[A-Z][a-z]+|[A-Z]{2,})(?:[ -](?:[A-Z][a-z]+|[A-Z]{2,}))*\b"
+    stop = {"What", "Why", "Who", "When", "Where", "How", "No", "Yes", "Misconception"}
+    return [term for term in re.findall(pattern, text) if term not in stop]
+
+
+def unique_nonempty(values: list[str]) -> list[str]:
+    seen = set()
+    result = []
+    for value in values:
+        cleaned = strip_html(value).strip(" —-:;,.?'")
+        lowered = cleaned.lower()
+        if (
+            cleaned
+            and lowered not in seen
+            and not any(lowered in old or old in lowered for old in seen)
+        ):
+            seen.add(lowered)
+            result.append(cleaned)
+    return result
+
+
+def lookup_candidates(
+    fields: dict[str, str], title_map: dict[str, str], title_field: str = ""
+) -> list[str]:
+    mapped = []
+    for value in fields.values():
+        stripped = strip_html(value)
+        if stripped in title_map:
+            mapped.append(title_map[stripped])
+
+    if title_field:
+        return unique_nonempty(
+            mapped
+            + [
+                title_map.get(
+                    strip_html(fields.get(title_field, "")), fields.get(title_field, "")
+                )
+            ]
+        )
+
+    question = fields.get("Question", "")
+    answer = fields.get("Answer", "")
+    context = fields.get("Context", "")
+    return unique_nonempty(
+        mapped
+        + bold_terms(question)
+        + bold_terms(answer)
+        + proper_noun_phrases(question)
+        + proper_noun_phrases(answer)
+        + [context]
+    )
+
+
+class WikiLookupCache:
+    def __init__(self, delay_seconds: float = 1.0):
+        self.delay_seconds = delay_seconds
+        self._cache: dict[tuple[str, int], WikiImage | None] = {}
+        self._last_request_at = 0.0
+
+    def find(self, title: str, thumb_size: int) -> WikiImage | None:
+        key = (title, thumb_size)
+        if key in self._cache:
+            return self._cache[key]
+
+        elapsed = time.monotonic() - self._last_request_at
+        if self._last_request_at and elapsed < self.delay_seconds:
+            time.sleep(self.delay_seconds - elapsed)
+        image = find_wiki_image(title, thumb_size)
+        self._last_request_at = time.monotonic()
+        self._cache[key] = image
+        return image
+
+
 def image_extension(url: str) -> str:
     base = url.split("?", 1)[0].lower()
     for ext in (".jpg", ".jpeg", ".png", ".webp", ".gif"):
@@ -241,12 +330,15 @@ def notify(summary: str) -> None:
 
 
 def plan_note(
-    note, args: argparse.Namespace, title_map: dict[str, str]
+    note,
+    args: argparse.Namespace,
+    title_map: dict[str, str],
+    lookup_cache: WikiLookupCache,
 ) -> NotePlanResult:
     fields = dict(note.items())
-    missing = [
-        field for field in (args.title_field, args.image_field) if field not in fields
-    ]
+    missing = [args.image_field] if args.image_field not in fields else []
+    if args.title_field and args.title_field not in fields:
+        missing.append(args.title_field)
     if missing:
         print(f"[nid {note.id}] SKIP: missing required field(s): {missing}")
         return NotePlanResult(skipped=True)
@@ -255,27 +347,32 @@ def plan_note(
         print(f"[nid {note.id}] SKIP: {args.image_field} already filled")
         return NotePlanResult(skipped=True)
 
-    raw_title = fields[args.title_field].strip()
-    if not raw_title:
-        print(f"[nid {note.id}] SKIP: empty {args.title_field}")
+    candidates = lookup_candidates(fields, title_map, args.title_field)
+    if not candidates:
+        print(f"[nid {note.id}] SKIP: no lookup candidates found")
         return NotePlanResult(skipped=True)
 
-    lookup_title = title_map.get(raw_title, raw_title)
-    try:
-        wiki_image = find_wiki_image(lookup_title, args.thumb_size)
-    except Exception as e:
-        print(
-            f"[nid {note.id}] FAIL: Wikipedia lookup failed for {lookup_title!r}: {e}"
-        )
-        return NotePlanResult()
+    errors = []
+    for lookup_title in candidates:
+        try:
+            wiki_image = lookup_cache.find(lookup_title, args.thumb_size)
+        except Exception as e:
+            errors.append(f"{lookup_title!r}: {e}")
+            continue
+        if wiki_image:
+            if lookup_title != candidates[0]:
+                print(f"[nid {note.id}] fallback matched {lookup_title!r}")
+            return NotePlanResult(
+                update=PlannedUpdate(note.id, lookup_title, wiki_image)
+            )
 
-    if not wiki_image:
+    if errors:
+        print(f"[nid {note.id}] FAIL: Wikipedia lookup failed: {'; '.join(errors)}")
+    else:
         print(
-            f"[nid {note.id}] FAIL: no Wikipedia thumbnail found for {lookup_title!r}"
+            f"[nid {note.id}] FAIL: no Wikipedia thumbnail found for candidates {candidates!r}"
         )
-        return NotePlanResult()
-
-    return NotePlanResult(update=PlannedUpdate(note.id, lookup_title, wiki_image))
+    return NotePlanResult()
 
 
 def flagged_card_ids_for_note(col: Any, nid: int) -> list[int]:
@@ -291,6 +388,7 @@ def main() -> None:
 
         anki_paths = resolve_anki_paths(args.anki_profile, require_media=True)
         title_map = load_title_map(args.title_map)
+        lookup_cache = WikiLookupCache()
 
         col = Collection(str(anki_paths.collection))
         try:
@@ -306,7 +404,7 @@ def main() -> None:
                 note = col.get_note(nid)
                 if args.source_field not in dict(note.items()):
                     source_field_missing = True
-                result = plan_note(note, args, title_map)
+                result = plan_note(note, args, title_map, lookup_cache)
                 if result.skipped:
                     counts.skipped += 1
                 elif result.update:

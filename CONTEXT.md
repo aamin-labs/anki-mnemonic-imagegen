@@ -13,8 +13,8 @@ A small-to-medium image found from Wikipedia/Wikimedia and written to the card's
 _Avoid_: AI-generated mnemonic image, generated image
 
 **Image Lookup Title**:
-The field value used as the Wikipedia search/title candidate; defaults to the card's `Answer` field.
-_Avoid_: prompt, image prompt
+The Wikipedia search/title candidate derived from card-specific anchors: title-map override, bold terms in Question/Answer, proper-noun phrases, then Context as a last fallback.
+_Avoid_: prompt, image prompt, raw explanatory answer
 
 **Image Source**:
 The Wikipedia page URL recorded in the card's existing `Source` field when available.

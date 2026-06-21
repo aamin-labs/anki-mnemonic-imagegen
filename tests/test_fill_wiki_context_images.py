@@ -57,6 +57,30 @@ class FillWikiContextImagesTests(unittest.TestCase):
         ):
             self.assertEqual(wiki.find_wiki_image("messy wording", 260), result)
 
+    def test_lookup_candidates_prefers_bold_terms_over_context(self):
+        fields = {
+            "Question": "Why did <b>Normandy landings</b> succeed despite German defenses?",
+            "Answer": "<b>Operation Fortitude</b> fooled Hitler.",
+            "Context": "D-Day",
+        }
+
+        self.assertEqual(
+            wiki.lookup_candidates(fields, {}, "")[:3],
+            ["Normandy landings", "Operation Fortitude", "German"],
+        )
+        self.assertEqual(wiki.lookup_candidates(fields, {}, "")[-1], "D-Day")
+
+    def test_lookup_candidates_title_map_overrides_any_matching_field_value(self):
+        fields = {
+            "Question": "What shaped Churchill's resistance?",
+            "Answer": "Failed 1942 Dieppe Raid and WWI trench-slaughter memory.",
+            "Context": "D-Day",
+        }
+
+        candidates = wiki.lookup_candidates(fields, {"D-Day": "Normandy landings"}, "")
+
+        self.assertEqual(candidates[0], "Normandy landings")
+
     def test_image_extension_defaults_to_jpg_when_url_has_no_known_suffix(self):
         self.assertEqual(
             wiki.image_extension("https://upload.wikimedia.org/thumb/foo"), ".jpg"

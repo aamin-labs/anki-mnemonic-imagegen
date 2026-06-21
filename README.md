@@ -78,7 +78,7 @@ The script auto-backs up `collection.anki2` before writing and refuses to run wh
 
 ### `scripts/fill_wiki_context_images.py`
 
-Fills the `Image` field for purple-flagged cards (`flag:6 -is:suspended`) with a small Wikipedia/Wikimedia page thumbnail. Uses the `Answer` field as the Wikipedia title/search text, writes the page URL to an existing `Source` field when present, clears `flag:6` after success, and adds `wiki-image-added`.
+Fills the `Image` field for purple-flagged cards (`flag:6 -is:suspended`) with a small Wikipedia/Wikimedia page thumbnail. Derives Wikipedia candidates from title-map overrides, bold terms in `Question`/`Answer`, proper-noun phrases, then `Context` as fallback; writes the page URL to an existing `Source` field when present, clears `flag:6` after success, and adds `wiki-image-added`.
 
 **Dry run:**
 ```bash
